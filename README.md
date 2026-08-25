@@ -259,12 +259,6 @@ network-ping-pro/
 
 ---
 
-## 📄 License
-
-MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
 ## 👨‍💻 Author
 
 ### Erffan
@@ -530,11 +524,6 @@ network-ping-pro/
 
 ---
 
-## 📄 مجوز
-
-این پروژه تحت مجوز MIT منتشر شده است - برای جزئیات به فایل [LICENSE](LICENSE) مراجعه کنید.
-
----
 
 ## 👨‍💻 توسعه‌دهنده
 
