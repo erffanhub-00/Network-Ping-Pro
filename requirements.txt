@@ -1,0 +1,22 @@
+# Network Ping Pro - Python Dependencies
+# Version: 2.0.0
+
+# Note: This tool primarily uses Python standard library.
+# Only 'requests' is required for optional HTTP testing fallback.
+# Most functionality works without any external packages.
+
+# Required for HTTP method (optional - curl is preferred)
+requests>=2.28.0
+
+# For creating standalone executable (development only)
+pyinstaller>=5.0.0
+
+# For development and testing (optional)
+pytest>=7.0.0
+
+
+# نصب همه وابستگی‌ها
+pip install -r requirements.txt
+
+# یا فقط نصب requests
+pip install requests
