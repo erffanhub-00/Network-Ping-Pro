@@ -1,19 +1,67 @@
+# ============================================================
+# Network Ping Pro - .gitignore
+# ============================================================
+
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# --- Build / Distribution ---
 build/
 dist/
 *.egg-info/
+.eggs/
+develop-eggs/
+downloads/
+wheels/
+*.whl
+
+# --- Virtual Environments ---
 .venv/
 venv/
 env/
-.idea/
-.vscode/
-*.log
-results*.csv
-results*.json
+ENV/
+.python-version
+
+# --- Testing / Coverage ---
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+.tox/
+.nox/
+*.cover
+
+# --- IDE / Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# --- OS / System ---
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Project Artifacts ---
+results*.csv
+results*.json
+*.log
+*.broken
+output.txt
+
+# --- Backups ---
+*.bak
+*.orig
+*.tmp
