@@ -214,11 +214,11 @@ network-ping-pro/
 
 ---
 
-## ✦ Screenshot
+## 🚀 Demo
 
-Add a screenshot of the actual terminal output here:
+Network Ping Pro running directly from the Windows Command Prompt:
 
-![Network Ping Pro Demo](screenshots/demo.png)
+![Network Ping Pro Demo](screenshots/demo.gif)
 
 ---
 
