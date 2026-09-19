@@ -1,542 +1,735 @@
-# 🌐 Network Ping Pro
+# Network Ping Pro
 
-<div align="center">
+A practical CLI network diagnostic tool for testing **latency, packet loss, jitter, DNS resolution, TCP connectivity, and HTTP performance**.
 
-![Python](https://img.shields.io/badge/Python-3.7+-blue?style=for-the-badge&logo=python)
-![Tkinter](https://img.shields.io/badge/Tkinter-GUI-green?style=for-the-badge&logo=tk)
-![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-2.0.0-red?style=for-the-badge)
+Network Ping Pro is designed to run real network tests directly from your local machine using **ICMP, TCP, and HTTP**.
 
-**Professional Network Diagnostic Tool - ICMP / TCP / HTTP**
-
-[English](#-english) • [فارسی](#-فارسی)
-
-</div>
+> **Version:** 1.0.0
+> **Author:** Erffan
+> **License:** MIT
 
 ---
 
-# 🇬🇧 English
+## 🌐 Website
 
-## 📖 Overview
-
-**Network Ping Pro** is a powerful, user-friendly network diagnostic tool that tests connectivity and latency using multiple protocols. Built with Python and Tkinter, it provides comprehensive network analysis with real-time results, scoring, and export capabilities.
-
-### Why Network Ping Pro?
-
-| Feature | Benefit |
-|---------|---------|
-| **Multi-Protocol** | Test with ICMP, TCP, or HTTP |
-| **Proxy Support** | Works with HTTP, HTTPS, SOCKS4, SOCKS5 |
-| **Real-time Results** | Live progress and detailed statistics |
-| **Smart Scoring** | 0-100 quality score with grades |
-| **Export Options** | CSV and JSON export |
-| **User-Friendly** | Simple GUI with copy/paste support |
+🔗 **Project Website:**
+https://website-erffan.erffanhub.workers.dev/
 
 ---
 
 ## ✨ Features
 
-### 🔍 Testing Methods
-- **ICMP** - Standard ping (fastest, no proxy)
-- **TCP** - Real TCP connection test (supports proxy)
-- **HTTP** - Real HTTP/HTTPS request (supports proxy)
+* ICMP ping testing
+* TCP connection testing
+* HTTP/HTTPS performance testing
+* IPv4 and IPv6 support
+* DNS resolution timing
+* Connection timing
+* HTTP TTFB measurement
+* Total HTTP request timing
+* Average / minimum / maximum latency
+* Jitter calculation
+* P50 / P95 / P99 percentiles
+* Packet loss calculation
+* Custom diagnostic score
+* Automatic grade
+* HTTP status code detection
+* HTTP status distribution
+* Multiple concurrent workers
+* Configurable timeout and request count
+* HTTP/SOCKS4/SOCKS5 proxy support
+* CSV export
+* JSON export
+* Quiet / script-friendly mode
+* Colored terminal output
+* Progress display
+* Target file support
+* Graceful cancellation with `Ctrl+C`
 
-### 📊 Comprehensive Statistics
-- **Basic:** Min, Max, Average
-- **Advanced:** Jitter, P50, P95, P99
-- **Network:** Packet Loss, DNS Resolution Time
-- **Protocol Specific:** TCP Connect Time, HTTP Status Code
+---
 
-### 🎯 Smart Scoring System
-- **Score:** 0-100 quality score
-- **Grade:** Excellent / Very Good / Good / Fair / Poor
-- **Multi-factor:** Latency, Packet Loss, Jitter, P95 Penalty
+## 📊 What It Measures
 
-### 🌐 Proxy Support
-- HTTP / HTTPS Proxy
-- SOCKS4 / SOCKS5 Proxy
-- Authentication Support
-- v2ray/Hiddify Preset
+### ICMP
 
-### 📈 Export & Logging
-- **CSV Export** - Spreadsheet compatible
-- **JSON Export** - Machine readable
-- **Live Log** - Real-time activity log
-- **Log Export** - Save diagnostic logs
+Measures traditional network ping latency and packet loss.
 
-### 🖥️ User Interface
-- Clean, modern design
-- Copy/Paste support (Ctrl+A, Ctrl+C, Ctrl+V)
-- Right-click context menu
-- Progress tracking
-- Responsive layout
+```text
+DNS → ICMP Ping → Statistics
+```
+
+### TCP
+
+Measures the time required to establish a TCP connection to a specific port.
+
+```text
+DNS → TCP Connect → Statistics
+```
+
+The TCP test connects directly to the IP address resolved during the DNS stage.
+
+### HTTP
+
+Measures real HTTP/HTTPS requests using `curl`.
+
+```text
+DNS → HTTP Request
+          ├── Connect
+          ├── TTFB
+          └── Total
+```
+
+For HTTP, DNS is measured separately because `curl` performs its own DNS resolution internally.
+
+---
+
+## 📈 Statistics
+
+Network Ping Pro calculates:
+
+| Metric | Description                                    |
+| ------ | ---------------------------------------------- |
+| Avg    | Average latency                                |
+| Min    | Minimum latency                                |
+| Max    | Maximum latency                                |
+| Jitter | Average difference between consecutive samples |
+| P50    | 50th percentile                                |
+| P95    | 95th percentile                                |
+| P99    | 99th percentile                                |
+| Loss   | Percentage of failed attempts                  |
+
+For HTTP requests, additional stage measurements are available:
+
+* DNS
+* TCP/TLS connection time reported by curl
+* TTFB
+* Total request time
+
+---
+
+## 🎯 Score
+
+The tool includes a **custom diagnostic score from 0 to 100**.
+
+The score considers:
+
+* Latency
+* Packet loss
+* Jitter
+* P95 tail latency
+* HTTP application status
+
+The score is a **heuristic created specifically for this tool**.
+
+It is **not an industry-standard network benchmark** and should not be compared directly with scores from other applications.
+
+---
+
+## 🏆 Ranking
+
+Results are ranked by the custom diagnostic score.
+
+```text
+Rank is by custom diagnostic Score
+```
+
+Ranking does **not** represent an official network-quality standard.
 
 ---
 
 ## 🚀 Installation
 
-### Prerequisites
+### Requirements
+
+* Python 3.9+
+* `curl` for HTTP testing
+* Operating system with `ping` for ICMP testing
+
+The Python project uses only the Python standard library.
+
+### Clone
 
 ```bash
-# Python 3.7 or higher
-python --version
+git clone https://github.com/erffanhub-00/network-ping-pro.git
+cd network-ping-pro
+```
 
-# Required for HTTP method
+### Run
+
+```bash
+python network_ping_pro.py google.com
+```
+
+---
+
+## 📦 Dependencies
+
+Python dependencies:
+
+```text
+None
+```
+
+All Python modules used by the project are included in the Python standard library.
+
+For HTTP testing, install **curl** separately.
+
+Check curl:
+
+```bash
 curl --version
 ```
 
-### Quick Install
+If curl is unavailable, ICMP and TCP modes can still be used.
+
+---
+
+## 🖥️ Basic Usage
+
+### ICMP
 
 ```bash
-# Clone the repository
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
-
-# Run the application
-python network_ping_pro.py
+python network_ping_pro.py google.com
 ```
 
-### One-File Version
+Multiple targets:
 
 ```bash
-# Download the single file
-curl -O https://raw.githubusercontent.com/erffanhub-00/network-ping-pro/main/network_ping_pro.py
-
-# Run it
-python network_ping_pro.py
+python network_ping_pro.py google.com github.com cloudflare.com
 ```
 
-### Create Executable
+---
+
+### TCP
+
+Test TCP port 443:
 
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name "NetworkPingPro" network_ping_pro.py
+python network_ping_pro.py -m TCP google.com:443
 ```
 
----
-
-## 📝 Usage
-
-### Basic Usage
-
-1. **Enter Targets**
-   ```
-   google.com
-   github.com:443
-   https://example.com/test
-   ```
-
-2. **Select Method**
-   - `ICMP` - Standard ping
-   - `TCP` - Connection test
-   - `HTTP` - HTTP/HTTPS request
-
-3. **Configure Settings**
-   - `Pings`: Number of tests (1-50)
-   - `Timeout`: Max wait time (1-10s)
-   - `Workers`: Concurrent tests (1-20)
-
-4. **Start Test** - Click "Start Test"
-
-### Target Formats
-
-| Format | Example | Method |
-|--------|---------|--------|
-| Domain | `google.com` | All Methods |
-| Domain:Port | `google.com:443` | TCP |
-| URL | `https://example.com/test` | HTTP |
-| IPv6 | `[::1]:8080` | All Methods |
-| IPv4 | `8.8.8.8` | All Methods |
-
-### Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+A` | Select all targets |
-| `Ctrl+V` | Paste from clipboard |
-| `Ctrl+C` | Copy from log |
-| `Right-click` | Context menu |
-
----
-
-## 🔒 Proxy Setup
-
-### Enable Proxy
-
-1. Check **"Use Proxy"**
-2. Select proxy type:
-   - `http` / `https` - HTTP proxy
-   - `socks4` / `socks5` - SOCKS proxy
-3. Enter **Host** and **Port**
-4. Click **"v2ray/Hiddify Preset"** for quick setup
-
-### Proxy Presets
-
-| Service | Type | Host | Port |
-|---------|------|------|------|
-| v2ray | SOCKS5 | 127.0.0.1 | 10808 |
-| Hiddify | SOCKS5 | 127.0.0.1 | 10808 |
-| Hiddify (HTTP) | HTTP | 127.0.0.1 | 10809 |
-
----
-
-## 📊 Results Explained
-
-### Score & Grade
-
-| Score | Grade | Meaning |
-|-------|-------|---------|
-| 90-100 | Excellent | Perfect connection |
-| 80-89 | Very Good | Great connection |
-| 70-79 | Good | Acceptable |
-| 60-69 | Fair | Needs improvement |
-| <60 | Poor | Unstable connection |
-
-### Statistics
-
-| Metric | Description |
-|--------|-------------|
-| **Avg** | Average response time (ms) |
-| **Min/Max** | Fastest/slowest response |
-| **Jitter** | Variation between responses |
-| **P50** | 50% of responses under this value |
-| **P95** | 95% of responses under this value |
-| **P99** | 99% of responses under this value |
-| **Loss** | Percentage of lost packets |
-
-### Status Codes
-
-| Status | Meaning |
-|--------|---------|
-| **OK** | Test successful |
-| **Timeout** | No response within timeout |
-| **Refused** | Connection refused (TCP) |
-| **DNS Error** | DNS resolution failed |
-| **Unreachable** | Host unreachable |
-| **HTTP Code** | HTTP status code (200, 404, etc.) |
-
----
-
-## 🛠️ Requirements
-
-| Component | Requirement |
-|-----------|-------------|
-| **ICMP** | Built-in ping command |
-| **TCP** | Python socket library |
-| **HTTP** | curl installed |
-| **Proxy** | curl for HTTP/HTTPS |
-| **OS** | Windows/Linux/macOS |
-
-### Install curl (Windows)
-
-```powershell
-# Download from: https://curl.se/windows/
-# Or use winget
-winget install curl
-```
-
----
-
-## 📁 Project Structure
-
-```
-network-ping-pro/
-├── network_ping_pro.py   # Main application
-├── README.md             # This file
-├── LICENSE               # MIT License
-└── requirements.txt      # Python dependencies
-```
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## 👨‍💻 Author
-
-### Erffan
-
-<div align="center">
-
-[![Telegram](https://img.shields.io/badge/Telegram-erffan__hub-blue?style=for-the-badge&logo=telegram)](https://t.me/erffan_hub)
-[![Twitter](https://img.shields.io/badge/Twitter-@Erffanhub__00-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/Erffanhub_00)
-[![Gist](https://img.shields.io/badge/Gist-Profile-000000?style=for-the-badge&logo=github)](https://gist.github.com/erffanhub-00)
-[![GitHub](https://img.shields.io/badge/GitHub-Profile-000000?style=for-the-badge&logo=github)](https://github.com/erffanhub-00)
-
-</div>
-
-
-
-
-
----
-
-# 🇮🇷 فارسی
-
-## 📖 معرفی
-
-**Network Ping Pro** یک ابزار قدرتمند و کاربرپسند برای تشخیص شبکه است که اتصال و تأخیر را با استفاده از چندین پروتکل مختلف تست می‌کند. این برنامه با پایتون و Tkinter ساخته شده و تحلیل جامع شبکه را با نتایج لحظه‌ای، امتیازدهی و قابلیت خروجی ارائه می‌دهد.
-
-### چرا Network Ping Pro؟
-
-| ویژگی | مزیت |
-|-------|------|
-| **چند-پروتکلی** | تست با ICMP، TCP یا HTTP |
-| **پشتیبانی از پروکسی** | کار با HTTP، HTTPS، SOCKS4، SOCKS5 |
-| **نتایج لحظه‌ای** | پیشرفت زنده و آمار دقیق |
-| **امتیازدهی هوشمند** | امتیاز کیفیت ۰ تا ۱۰۰ با درجه‌بندی |
-| **خروجی‌های مختلف** | خروجی CSV و JSON |
-| **کاربرپسند** | رابط گرافیکی ساده با پشتیبانی از کپی/پیست |
-
----
-
-## ✨ قابلیت‌ها
-
-### 🔍 روش‌های تست
-- **ICMP** - پینگ استاندارد (سریع‌ترین، بدون پروکسی)
-- **TCP** - تست اتصال TCP واقعی (پشتیبانی از پروکسی)
-- **HTTP** - درخواست HTTP/HTTPS واقعی (پشتیبانی از پروکسی)
-
-### 📊 آمار جامع
-- **پایه:** حداقل، حداکثر، میانگین
-- **پیشرفته:** جیتر، P50، P95، P99
-- **شبکه:** درصد از دست رفتن بسته، زمان Resolution DNS
-- **مخصوص پروتکل:** زمان اتصال TCP، کد وضعیت HTTP
-
-### 🎯 سیستم امتیازدهی هوشمند
-- **امتیاز:** کیفیت ۰ تا ۱۰۰
-- **درجه:** عالی / خیلی خوب / خوب / متوسط / ضعیف
-- **چندعاملی:** تأخیر، از دست رفتگی، جیتر، جریمه P95
-
-### 🌐 پشتیبانی از پروکسی
-- پروکسی HTTP / HTTPS
-- پروکسی SOCKS4 / SOCKS5
-- پشتیبانی از احراز هویت
-- تنظیم سریع v2ray/Hiddify
-
-### 📈 خروجی و لاگ
-- **خروجی CSV** - سازگار با صفحات گسترده
-- **خروجی JSON** - قابل خواندن توسط ماشین
-- **لاگ زنده** - لاگ فعالیت لحظه‌ای
-- **ذخیره لاگ** - ذخیره لاگ‌های تشخیصی
-
-### 🖥️ رابط کاربری
-- طراحی تمیز و مدرن
-- پشتیبانی از کپی/پیست (Ctrl+A، Ctrl+C، Ctrl+V)
-- منوی راست‌کلیک
-- نمایش پیشرفت
-- واکنش‌گرا
-
----
-
-## 🚀 نصب
-
-### پیش‌نیازها
+Multiple targets:
 
 ```bash
-# پایتون ۳.۷ یا بالاتر
-python --version
-
-# برای روش HTTP نیاز است
-curl --version
+python network_ping_pro.py -m TCP google.com:443 github.com:443
 ```
 
-### نصب سریع
+You can also use a target without a port:
 
 ```bash
-# کلون کردن مخزن
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
-
-# اجرای برنامه
-python network_ping_pro.py
+python network_ping_pro.py -m TCP google.com
 ```
 
-### نسخه تک‌فایل
+The default TCP port is `443`.
+
+---
+
+### HTTP / HTTPS
 
 ```bash
-# دانلود فایل
-curl -O https://raw.githubusercontent.com/erffanhub-00/network-ping-pro/main/network_ping_pro.py
-
-# اجرا
-python network_ping_pro.py
+python network_ping_pro.py -m HTTP https://google.com
 ```
 
-### ساخت فایل اجرایی
+Custom path:
 
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name "NetworkPingPro" network_ping_pro.py
+python network_ping_pro.py -m HTTP https://example.com/api
 ```
 
-فایل اجرایی در پوشه `dist` قرار می‌گیرد.
+Query parameters:
 
----
+```bash
+python network_ping_pro.py -m HTTP "https://example.com/search?q=test"
+```
 
-## 📝 نحوه استفاده
+HTTP defaults to HTTPS when no scheme is specified.
 
-### استفاده اولیه
-
-1. **وارد کردن مقصدها**
-   ```
-   google.com
-   github.com:443
-   https://example.com/test
-   ```
-
-2. **انتخاب روش**
-   - `ICMP` - پینگ استاندارد
-   - `TCP` - تست اتصال
-   - `HTTP` - درخواست HTTP/HTTPS
-
-3. **تنظیمات**
-   - `تعداد پینگ`: تعداد تست‌ها (۱ تا ۵۰)
-   - `زمان انتظار`: حداکثر زمان انتظار (۱ تا ۱۰ ثانیه)
-   - `تعداد همزمان`: تست‌های همزمان (۱ تا ۲۰)
-
-4. **شروع تست** - کلیک روی "شروع تست"
-
-### فرمت‌های مقصد
-
-| فرمت | مثال | روش |
-|------|------|-----|
-| دامنه | `google.com` | همه روش‌ها |
-| دامنه:پورت | `google.com:443` | TCP |
-| URL | `https://example.com/test` | HTTP |
-| IPv6 | `[::1]:8080` | همه روش‌ها |
-| IPv4 | `8.8.8.8` | همه روش‌ها |
-
-### میانبرهای صفحه‌کلید
-
-| میانبر | عملکرد |
-|--------|---------|
-| `Ctrl+A` | انتخاب همه مقصدها |
-| `Ctrl+V` | چسباندن از کلیپ‌بورد |
-| `Ctrl+C` | کپی از لاگ |
-| `راست‌کلیک` | منوی زمینه |
-
----
-
-## 🔒 تنظیمات پروکسی
-
-### فعال کردن پروکسی
-
-1. تیک **"استفاده از پروکسی"** را بزنید
-2. نوع پروکسی را انتخاب کنید:
-   - `http` / `https` - پروکسی HTTP
-   - `socks4` / `socks5` - پروکسی SOCKS
-3. **میزبان** و **پورت** را وارد کنید
-4. برای تنظیم سریع کلیک روی **"تنظیم v2ray/Hiddify"**
-
-### تنظیمات سریع پروکسی
-
-| سرویس | نوع | میزبان | پورت |
-|-------|------|--------|------|
-| v2ray | SOCKS5 | 127.0.0.1 | 10808 |
-| Hiddify | SOCKS5 | 127.0.0.1 | 10808 |
-| Hiddify (HTTP) | HTTP | 127.0.0.1 | 10809 |
-
----
-
-## 📊 توضیح نتایج
-
-### امتیاز و درجه
-
-| امتیاز | درجه | معنی |
-|--------|------|------|
-| ۹۰-۱۰۰ | عالی | اتصال عالی |
-| ۸۰-۸۹ | خیلی خوب | اتصال عالی |
-| ۷۰-۷۹ | خوب | قابل قبول |
-| ۶۰-۶۹ | متوسط | نیاز به بهبود |
-| <۶۰ | ضعیف | اتصال ناپایدار |
-
-### آمار
-
-| معیار | توضیح |
-|-------|-------|
-| **میانگین** | میانگین زمان پاسخ (ms) |
-| **حداقل/حداکثر** | سریع‌ترین/کندترین پاسخ |
-| **جیتر** | تغییرات بین پاسخ‌ها |
-| **P50** | ۵۰٪ پاسخ‌ها کمتر از این مقدار |
-| **P95** | ۹۵٪ پاسخ‌ها کمتر از این مقدار |
-| **P99** | ۹۹٪ پاسخ‌ها کمتر از این مقدار |
-| **از دست رفته** | درصد بسته‌های از دست رفته |
-
-### کدهای وضعیت
-
-| وضعیت | معنی |
-|-------|------|
-| **OK** | تست موفق |
-| **Timeout** | بدون پاسخ در زمان تعیین شده |
-| **Refused** | اتصال رد شد (TCP) |
-| **DNS Error** | خطا در Resolution DNS |
-| **Unreachable** | میزبان در دسترس نیست |
-| **HTTP Code** | کد وضعیت HTTP (۲۰۰، ۴۰۴ و...) |
-
----
-
-## 🛠️ نیازمندی‌ها
-
-| جزء | نیازمندی |
-|-----|----------|
-| **ICMP** | دستور ping داخلی |
-| **TCP** | کتابخانه socket پایتون |
-| **HTTP** | curl نصب شده |
-| **پروکسی** | curl برای HTTP/HTTPS |
-| **سیستم‌عامل** | Windows/Linux/macOS |
-
-### نصب curl (ویندوز)
-
-```powershell
-# دانلود از: https://curl.se/windows/
-# یا استفاده از winget
-winget install curl
+```bash
+python network_ping_pro.py -m HTTP google.com
 ```
 
 ---
 
-## 📁 ساختار پروژه
+## ⚙️ Options
 
-```
-network-ping-pro/
-├── network_ping_pro.py   # برنامه اصلی
-├── README.md             # این فایل
-├── LICENSE               # مجوز MIT
-└── requirements.txt      # وابستگی‌های پایتون
+```text
+-m, --method
 ```
 
----
+Testing method:
 
-## 🤝 مشارکت
+```text
+ICMP
+TCP
+HTTP
+```
 
-۱. مخزن را Fork کنید
-۲. شاخه ویژگی خود را ایجاد کنید (`git checkout -b feature/AmazingFeature`)
-۳. تغییرات خود را Commit کنید (`git commit -m 'Add some AmazingFeature'`)
-۴. به شاخه Push کنید (`git push origin feature/AmazingFeature`)
-۵. یک Pull Request باز کنید
+Default:
 
----
-
-
-## 👨‍💻 توسعه‌دهنده
-
-### Erffan
-
-<div align="center">
-
-[![Telegram](https://img.shields.io/badge/Telegram-erffan__hub-blue?style=for-the-badge&logo=telegram)](https://t.me/erffan_hub)
-[![Twitter](https://img.shields.io/badge/Twitter-@Erffanhub__00-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/Erffanhub_00)
-[![Gist](https://img.shields.io/badge/Gist-Profile-000000?style=for-the-badge&logo=github)](https://gist.github.com/erffanhub-00)
-[![GitHub](https://img.shields.io/badge/GitHub-Profile-000000?style=for-the-badge&logo=github)](https://github.com/erffanhub-00)
-
-</div>
-
+```text
+ICMP
+```
 
 ---
+
+```text
+-c, --count
+```
+
+Number of tests per target.
+
+Default:
+
+```text
+10
+```
+
+Example:
+
+```bash
+python network_ping_pro.py -c 20 google.com
+```
+
+Allowed range:
+
+```text
+1 - 200
+```
+
+---
+
+```text
+-t, --timeout
+```
+
+Timeout per test in seconds.
+
+Default:
+
+```text
+3.0
+```
+
+Example:
+
+```bash
+python network_ping_pro.py -t 5 google.com
+```
+
+Allowed range:
+
+```text
+1 - 30 seconds
+```
+
+---
+
+```text
+-w, --workers
+```
+
+Number of concurrent workers.
+
+Default:
+
+```text
+10
+```
+
+Example:
+
+```bash
+python network_ping_pro.py -w 20 google.com github.com
+```
+
+Allowed range:
+
+```text
+1 - 50
+```
+
+---
+
+## 🌐 Proxy
+
+Proxy support is available for **HTTP testing only**.
+
+Supported proxy types:
+
+* HTTP
+* HTTPS
+* SOCKS4
+* SOCKS5
+
+### SOCKS5
+
+```bash
+python network_ping_pro.py \
+  -m HTTP \
+  --proxy socks5://127.0.0.1:10808 \
+  https://google.com
+```
+
+### HTTP Proxy
+
+```bash
+python network_ping_pro.py \
+  -m HTTP \
+  --proxy http://127.0.0.1:8080 \
+  https://example.com
+```
+
+### Proxy Authentication
+
+```bash
+python network_ping_pro.py \
+  -m HTTP \
+  --proxy socks5://127.0.0.1:10808 \
+  --proxy-user username \
+  --proxy-pass password \
+  https://example.com
+```
+
+> Proxy configuration does not affect ICMP or TCP tests.
+
+---
+
+## 📄 Target File
+
+Targets can be loaded from a file.
+
+Example `targets.txt`:
+
+```text
+google.com
+github.com
+cloudflare.com
+https://example.com
+```
+
+Run:
+
+```bash
+python network_ping_pro.py -f targets.txt
+```
+
+Comments are supported:
+
+```text
+# Main websites
+google.com
+github.com
+
+# Cloudflare
+cloudflare.com
+```
+
+---
+
+## 📤 Export
+
+### CSV
+
+```bash
+python network_ping_pro.py \
+  -o results.csv \
+  google.com github.com
+```
+
+### JSON
+
+```bash
+python network_ping_pro.py \
+  --json results.json \
+  google.com github.com
+```
+
+### Both
+
+```bash
+python network_ping_pro.py \
+  -o results.csv \
+  --json results.json \
+  google.com github.com
+```
+
+The JSON export contains detailed result objects including:
+
+* DNS statistics
+* Connection statistics
+* TTFB
+* Total HTTP timing
+* HTTP status distribution
+* latency statistics
+* packet loss
+* score
+* grade
+* resolved IP
+* IP family
+* errors
+
+---
+
+## 🤫 Quiet Mode
+
+Quiet mode produces one line per target and is useful for scripts.
+
+```bash
+python network_ping_pro.py -q google.com github.com
+```
+
+Example:
+
+```text
+OK    google.com                               score= 92.4 avg=  18.2ms loss=   0% OK
+OK    github.com                               score= 87.1 avg=  31.5ms loss=   0% OK
+```
+
+Failed targets:
+
+```text
+FAIL  example.com                              Timeout  Connection timeout
+```
+
+---
+
+## 🎨 Disable Colors
+
+```bash
+python network_ping_pro.py --no-color google.com
+```
+
+Useful when redirecting output to files or processing output from scripts.
+
+---
+
+## ⏱️ Example
+
+```bash
+python network_ping_pro.py \
+  -m ICMP \
+  -c 20 \
+  -t 3 \
+  -w 10 \
+  google.com github.com cloudflare.com
+```
+
+TCP:
+
+```bash
+python network_ping_pro.py \
+  -m TCP \
+  -c 10 \
+  -t 3 \
+  google.com:443 github.com:443
+```
+
+HTTP:
+
+```bash
+python network_ping_pro.py \
+  -m HTTP \
+  -c 10 \
+  -t 5 \
+  https://google.com \
+  https://github.com
+```
+
+---
+
+## 🔬 HTTP Status Handling
+
+HTTP connectivity and application status are treated separately.
+
+For example:
+
+```text
+HTTP 200 → Network reachable + application OK
+HTTP 404 → Network reachable + application response, but application status is not OK
+HTTP 500 → Network reachable + server-side HTTP error
+```
+
+This prevents an HTTP `404` or `500` from being incorrectly interpreted as a network connectivity failure.
+
+The tool also records the distribution of HTTP status codes when multiple requests return different statuses.
+
+Example:
+
+```text
+200×8, 500×2
+```
+
+---
+
+## 🌍 IPv4 / IPv6
+
+The DNS resolver detects both:
+
+```text
+IPv4
+IPv6
+```
+
+TCP connections use the IP address selected during the DNS stage.
+
+IPv6 targets can be written using brackets:
+
+```bash
+python network_ping_pro.py -m TCP "[2001:db8::1]:443"
+```
+
+---
+
+## 🧠 Architecture
+
+The project is intentionally divided into separate components:
+
+```text
+Network Ping Pro
+│
+├── Color
+│   └── Terminal colors / Windows ANSI
+│
+├── StageStats
+│   └── Stage measurements
+│
+├── PingResult
+│   └── Test result model
+│
+├── StatisticsEngine
+│   ├── Average
+│   ├── Min / Max
+│   ├── Jitter
+│   ├── P50
+│   ├── P95
+│   ├── P99
+│   └── Custom Score
+│
+├── DNSResolver
+│   └── DNS resolution
+│
+├── PingEngine
+│   ├── ICMP
+│   ├── TCP
+│   └── HTTP
+│
+├── TargetParser
+│   └── Host / URL / IPv6 parsing
+│
+├── Renderer
+│   └── CLI output
+│
+├── PingRunner
+│   ├── Concurrency
+│   ├── Ranking
+│   └── Export
+│
+└── CLI
+    └── Argument parsing
+```
+
+---
+
+## ⚠️ Measurement Notes
+
+### DNS
+
+DNS resolution is measured separately.
+
+The resolver uses Python's:
+
+```python
+socket.getaddrinfo()
+```
+
+The timeout is a caller-side timeout guard. The underlying operating-system resolver may continue running in the background if it does not return within the configured timeout.
+
+### HTTP
+
+HTTP uses `curl`.
+
+The DNS measurement is separate from the actual curl connection because curl performs its own DNS resolution.
+
+Therefore:
+
+```text
+DNS timing ≠ necessarily curl's DNS timing
+```
+
+### TCP
+
+TCP connects directly to the IP selected during the DNS stage.
+
+Therefore the measured flow is:
+
+```text
+DNS → resolved IP → TCP connection
+```
+
+### ICMP
+
+ICMP relies on the operating system's `ping` command.
+
+Its output parsing can vary between operating systems and localized environments.
+
+---
+
+## 🛑 Cancellation
+
+Press:
+
+```text
+Ctrl+C
+```
+
+to request cancellation.
+
+Running subprocesses are terminated where possible and the program exits gracefully.
+
+---
+
+## 🔧 Supported Targets
+
+Examples:
+
+```text
+google.com
+google.com:443
+https://google.com
+https://example.com/api
+https://example.com/search?q=test
+[::1]
+[::1]:443
+```
+
+---
+
+## 📋 Exit Codes
+
+|  Code | Meaning                                     |
+| ----: | ------------------------------------------- |
+|   `0` | All tests successful                        |
+|   `1` | One or more tests failed                    |
+|   `2` | Invalid arguments / configuration / targets |
+| `130` | Interrupted by user                         |
+
+---
+
+## 📜 License
+
+This project is licensed under the **MIT License**.
+
+See [LICENSE](LICENSE) for details.
+
+---
+
+## 👤 Me
+
+[![Telegram](https://img.shields.io/badge/Telegram-erffan__hub-blue?style=for-the-badge\&logo=telegram)](https://t.me/erffan_hub)
+[![Twitter](https://img.shields.io/badge/Twitter-@Erffanhub__00-000000?style=for-the-badge\&logo=x\&logoColor=white)](https://x.com/Erffanhub_00)
+[![Gist](https://img.shields.io/badge/Gist-Profile-000000?style=for-the-badge\&logo=github)](https://gist.github.com/erffanhub-00)
+[![Github](https://img.shields.io/badge/Github-Profile-000000?style=for-the-badge\&logo=github)](https://github.com/erffanhub-00)
+
+---
+
+**Network Ping Pro** — A simple, practical CLI tool for real network diagnostics.
