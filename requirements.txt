@@ -1,9 +1,7 @@
-# Network Ping Pro
-
-# Python standard library only.
-
-# No third-party Python packages are required.
-
-# External system dependency:
-
-# curl - required for HTTP/HTTPS testing
+# Network Ping Pro has no runtime Python dependencies.
+# It uses only the Python standard library.
+#
+# For the HTTP method, install curl separately:
+#   - Windows 10+: preinstalled, or https://curl.se/windows/
+#   - Linux: sudo apt install curl
+#   - macOS: preinstalled

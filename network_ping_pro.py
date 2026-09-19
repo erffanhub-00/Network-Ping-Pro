@@ -65,11 +65,10 @@ class Color:
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            handle = kernel32.GetStdHandle(-11)
             mode = ctypes.c_uint32()
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 raise OSError("GetConsoleMode failed")
-            # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
         except Exception:
             cls.disable()
@@ -104,9 +103,9 @@ class PingResult:
     method: str
 
     # --- Test outcome (three independent flags) ---
-    reachable: bool = False               # Host responded at network level
-    test_success: bool = False            # Test completed without transport error
-    application_ok: Optional[bool] = None # HTTP: 2xx/3xx=True, 4xx/5xx=False
+    reachable: bool = False
+    test_success: bool = False
+    application_ok: Optional[bool] = None
 
     # --- Raw samples ---
     times: List[float] = field(default_factory=list)
@@ -129,7 +128,7 @@ class PingResult:
     status: str = 'Failed'
     error: Optional[str] = None
     resolved_ip: Optional[str] = None
-    ip_family: Optional[str] = None       # 'IPv4' or 'IPv6'
+    ip_family: Optional[str] = None
     rank: Optional[int] = None
 
     # --- Scoring (custom heuristic, not a standard metric) ---
@@ -214,13 +213,11 @@ class StatisticsEngine:
         Custom diagnostic score (0-100).
 
         This is a heuristic designed for comparing results WITHIN this tool.
-        It is NOT an industry-standard network benchmark and should not be
-        compared against external tools' scores.
+        It is NOT an industry-standard network benchmark.
         """
         if not r.test_success:
             return 0.0
 
-        # Latency component (35%)
         if r.avg is None:
             latency = 0
         elif r.avg <= 10:
@@ -238,7 +235,6 @@ class StatisticsEngine:
         else:
             latency = 10
 
-        # Loss component (30%)
         if r.packet_loss == 0:
             loss = 100
         elif r.packet_loss <= 1:
@@ -252,7 +248,6 @@ class StatisticsEngine:
         else:
             loss = 5
 
-        # Jitter component (25%)
         if r.jitter is None:
             jitter = 50
         elif r.jitter <= 2:
@@ -266,7 +261,6 @@ class StatisticsEngine:
         else:
             jitter = 15
 
-        # P95 tail penalty
         p95_penalty = 1.0
         if r.p95 and r.avg:
             ratio = r.p95 / r.avg
@@ -275,7 +269,6 @@ class StatisticsEngine:
             elif ratio > 2:
                 p95_penalty = 0.85
 
-        # HTTP application penalty (only if server returned an error status)
         app_penalty = 1.0
         if r.application_ok is False and r.http_status:
             if 400 <= r.http_status < 500:
@@ -310,8 +303,7 @@ class DNSResolver:
 
     Note: socket.getaddrinfo() cannot be interrupted mid-call. This
     function uses a daemon thread and joins with a timeout, so from the
-    caller's perspective the resolution "gives up" after `timeout` seconds,
-    even if the underlying OS resolver continues in the background.
+    caller's perspective the resolution "gives up" after `timeout` seconds.
     """
 
     @staticmethod
@@ -334,7 +326,6 @@ class DNSResolver:
                     result['error'] = 'No addresses'
                     return
 
-                # Prefer IPv4, fall back to IPv6
                 chosen = None
                 for info in infos:
                     if info[0] == socket.AF_INET:
@@ -392,7 +383,7 @@ class PingEngine:
 
     @staticmethod
     def _build_proxy_url() -> Optional[str]:
-        """Build curl-compatible proxy URL. Handles IPv6 and full URL-encoding of credentials."""
+        """Build curl-compatible proxy URL. Handles IPv6 and URL-encodes credentials."""
         if not PingEngine.PROXY_URL:
             return None
 
@@ -401,9 +392,8 @@ class PingEngine:
         host = parsed.hostname
         port = parsed.port
         if not scheme or not host or not port:
-            return PingEngine.PROXY_URL  # let curl handle / complain
+            return PingEngine.PROXY_URL
 
-        # Wrap IPv6 in brackets
         if ':' in host and not host.startswith('['):
             host_part = f"[{host}]"
         else:
@@ -422,6 +412,10 @@ class PingEngine:
         """Compute stats, score, grade, and set default status."""
         if not r.times:
             r.packet_loss = 100.0
+            r.test_success = False
+            r.score = 0.0
+            if r.grade is None:
+                r.grade = 'Failed'
             if r.status == 'OK':
                 r.status = 'Failed'
             return
@@ -472,16 +466,13 @@ class PingEngine:
         r.ip_family = family
 
         system = platform.system().lower()
-        # Round timeout to nearest 0.1s to preserve precision from CLI
         if system == 'windows':
             w_ms = max(1, int(round(timeout * 1000)))
             cmd = ['ping', '-n', str(count), '-w', str(w_ms), host]
         elif system == 'darwin':
-            # macOS -W is in milliseconds
             w_ms = max(1, int(round(timeout * 1000)))
             cmd = ['ping', '-c', str(count), '-W', str(w_ms), host]
         else:
-            # Linux iputils: -W is in seconds, accepts floats
             cmd = ['ping', '-c', str(count), '-W', f'{timeout:.2f}', host]
 
         process = None
@@ -596,9 +587,6 @@ class PingEngine:
                 sock = socket.socket(af, socket.SOCK_STREAM)
                 sock.settimeout(timeout)
                 try:
-                    # Connect to the exact IP that the DNS stage resolved.
-                    # This makes DNS-stage measurement and TCP connect
-                    # part of the same, consistent connection attempt.
                     if family == 'IPv6':
                         sock.connect((ip, port, 0, 0))
                     else:
@@ -627,13 +615,14 @@ class PingEngine:
         if times:
             r.reachable = True
             r.test_success = True
+            r.times = times
+            r.successes = len(times)
             r.status = 'OK'
             r.connect = StatisticsEngine.stage_stats(connect_samples)
             PingEngine._finalize(r)
             return r
 
         if refused > 0:
-            # Host is reachable but port is closed
             r.reachable = True
             r.test_success = False
             r.status = 'Refused'
@@ -671,7 +660,6 @@ class PingEngine:
         r.port = port
         r.attempts = count
 
-        # DNS measured separately. curl performs its own DNS internally.
         ip, family, dns_ms, dns_err = DNSResolver.resolve(host, timeout)
         if dns_ms is not None:
             r.dns = StageStats(avg=dns_ms, min=dns_ms, max=dns_ms,
@@ -698,7 +686,6 @@ class PingEngine:
         if query:
             url += f"?{query}"
 
-        # Safe delimiter. curl expands %% to a literal %, so we use '|'.
         curl_fmt = '%{time_total}|%{http_code}|%{time_connect}|%{time_starttransfer}'
 
         total_samples: List[float] = []
@@ -707,7 +694,6 @@ class PingEngine:
         status_codes: List[int] = []
 
         proxy_url = PingEngine._build_proxy_url()
-        # Preserve sub-second timeout precision for curl.
         timeout_str = f'{timeout:.2f}'
 
         for _ in range(count):
@@ -748,9 +734,6 @@ class PingEngine:
 
                 stdout, stderr = process.communicate()
 
-                # curl reports failure via non-zero exit code (connection
-                # refused, DNS failure, TLS error, timeout, proxy failure).
-                # These must NOT be counted as successful samples.
                 if process.returncode != 0:
                     continue
 
@@ -769,13 +752,10 @@ class PingEngine:
                 except ValueError:
                     continue
 
-                # HTTP code 000 means curl could not complete a request.
-                # Not a success.
                 if code <= 0:
                     continue
 
                 total_ms = total_s * 1000.0
-                # 0.000000 means curl never connected.
                 if not (0 < total_ms <= 60000):
                     continue
 
@@ -810,8 +790,6 @@ class PingEngine:
         r.total = StatisticsEngine.stage_stats(total_samples)
 
         if status_codes:
-            # Record full distribution, then pick a single representative
-            # status for the single-value field.
             dist = Counter(status_codes)
             r.http_status_distribution = dict(dist)
 
@@ -819,7 +797,6 @@ class PingEngine:
             if len(unique) == 1:
                 r.http_status = unique[0]
             else:
-                # Worst status wins (5xx > 4xx > 3xx > 2xx > 1xx)
                 r.http_status = max(unique)
 
             r.http_status_text = {
@@ -886,7 +863,6 @@ class TargetParser:
             if not value:
                 return None
 
-            # IPv6 with port: [::1]:8080
             if value.startswith('['):
                 m = re.match(r'\[([0-9a-fA-F:]+)\](?::(\d+))?$', value)
                 if m:
@@ -1086,7 +1062,7 @@ class Renderer:
         for r in results:
             rank = str(r.rank) if r.rank else '·'
 
-            if r.test_success:
+            if r.test_success and r.times:
                 score = f"{r.score:.1f}" if r.score is not None else "0.0"
                 grade = r.grade or "Unknown"
                 avg = f"{r.avg:.1f}" if r.avg is not None else "—"
@@ -1151,8 +1127,8 @@ class Renderer:
     def print_summary(results: List[PingResult], elapsed: float):
         total = len(results)
         net_ok = [r for r in results if r.reachable]
-        test_ok = [r for r in results if r.test_success]
-        failed = [r for r in results if not r.test_success]
+        test_ok = [r for r in results if r.test_success and r.times]
+        failed = [r for r in results if not (r.test_success and r.times)]
 
         print()
         print(f"{Color.BOLD}{Color.CYAN}  ╭────────────────────── SUMMARY ──────────────────────╮{Color.RESET}")
@@ -1170,19 +1146,25 @@ class Renderer:
             Color.RED if failed else Color.GREEN)
         row("Total time", f"{elapsed:.2f}s")
 
-        if test_ok:
-            lowest = min(test_ok, key=lambda r: r.avg if r.avg is not None else 1e9)
-            highest = max(test_ok, key=lambda r: r.avg if r.avg is not None else 0)
-            best = max(test_ok, key=lambda r: r.score if r.score is not None else 0)
+        latency_ok = [r for r in test_ok if r.avg is not None]
+        score_ok = [r for r in test_ok if r.score is not None]
 
+        if latency_ok or score_ok:
             print(f"  {Color.CYAN}├──────────────────────────────────────────────────────┤{Color.RESET}")
+
+        if latency_ok:
+            lowest = min(latency_ok, key=lambda r: r.avg)
+            highest = max(latency_ok, key=lambda r: r.avg)
             row("Lowest latency", f"{lowest.target}  ({lowest.avg:.1f} ms)", Color.GREEN)
             row("Highest latency", f"{highest.target}  ({highest.avg:.1f} ms)", Color.YELLOW)
+
+        if score_ok:
+            best = max(score_ok, key=lambda r: r.score)
+            grade = best.grade or "Unknown"
             row("Highest score",
-                f"{best.target}  ({best.score:.1f} — {best.grade})",
+                f"{best.target}  ({best.score:.1f} — {grade})",
                 Color.CYAN)
 
-        # HTTP status distribution across successful tests
         mixed = [r for r in test_ok
                  if r.http_status_distribution and len(r.http_status_distribution) > 1]
         if mixed:
@@ -1277,11 +1259,12 @@ class PingRunner:
             Renderer.print_latency_chart(results)
             Renderer.print_summary(results, elapsed)
         else:
-            # Quiet: one line per target. Machine-friendly.
             for r in results:
-                if r.test_success:
+                if r.test_success and r.times:
+                    avg = r.avg if r.avg is not None else 0.0
+                    score = r.score if r.score is not None else 0.0
                     print(f"OK    {r.target:<40} "
-                          f"score={r.score:>5.1f} avg={r.avg:>7.1f}ms "
+                          f"score={score:>5.1f} avg={avg:>7.1f}ms "
                           f"loss={r.packet_loss:>4.0f}% {r.status}")
                 else:
                     print(f"FAIL  {r.target:<40} {r.status}  {r.error or ''}")
@@ -1291,7 +1274,10 @@ class PingRunner:
         if self.args.output_json:
             self._export_json(self.args.output_json)
 
-        if all(r.test_success for r in results):
+        def is_real_success(r):
+            return r.test_success and bool(r.times)
+
+        if all(is_real_success(r) for r in results):
             return 0
         return 1
 
@@ -1340,7 +1326,7 @@ class PingRunner:
 
     @staticmethod
     def _rank(results: List[PingResult]) -> List[PingResult]:
-        successful = [r for r in results if r.test_success]
+        successful = [r for r in results if r.test_success and r.times]
         successful.sort(
             key=lambda x: x.score if x.score is not None else 0,
             reverse=True,
@@ -1348,7 +1334,7 @@ class PingRunner:
         for i, r in enumerate(successful, 1):
             r.rank = i
 
-        failed = [r for r in results if not r.test_success]
+        failed = [r for r in results if not (r.test_success and r.times)]
         failed.sort(key=lambda x: (not x.reachable, x.target))
         return successful + failed
 

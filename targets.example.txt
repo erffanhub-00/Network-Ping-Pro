@@ -1,0 +1,17 @@
+# Network Ping Pro - example targets file
+# Lines starting with # are ignored.
+
+google.com
+cloudflare.com
+github.com
+
+# TCP targets
+1.1.1.1:443
+8.8.8.8:53
+
+# HTTP
+https://example.com
+https://www.wikipedia.org
+
+# IPv6
+[2606:4700:4700::1111]:443
