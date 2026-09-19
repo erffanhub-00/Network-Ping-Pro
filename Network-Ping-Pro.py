@@ -1,32 +1,84 @@
+#!/usr/bin/env python3
 # ============================================================
-# Network Ping Pro - Professional Network Diagnostic Tool
+# Network Ping Pro - CLI Edition
 # Version: 1.0.0
 # Author: Erffan
 # License: MIT
 # ============================================================
+#
+# NOTE on measurements:
+#   - DNS resolution is measured SEPARATELY from the connection.
+#     For HTTP, curl performs its own DNS resolution internally.
+#   - For TCP, the connection is made to the IP resolved in the DNS stage,
+#     so DNS timing and TCP connect timing belong to the same attempt.
+#   - "Score" is a CUSTOM heuristic metric for comparing results
+#     within this tool. It is NOT an industry-standard benchmark.
+#   - "Rank" is by custom Score, not by a standard network metric.
+# ============================================================
 
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
-import subprocess
-import re
-import platform
-import statistics
-import time
-import threading
-import socket
-import ssl
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-import json
+import argparse
 import csv
-import webbrowser
-from urllib.parse import urlparse
-from queue import Queue
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+import json
 import os
-import warnings
-warnings.filterwarnings("ignore")
+import platform
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import List, Optional, Dict, Any, Tuple
+from urllib.parse import urlparse, quote
+
+__version__ = "1.0.0"
+__author__ = "Erffan"
+__license__ = "MIT"
+
+
+# ============================================================
+# ANSI COLORS
+# ============================================================
+
+class Color:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+
+    @classmethod
+    def enable_windows_ansi(cls):
+        """Enable ANSI on Windows 10+ without clobbering other console flags."""
+        if platform.system().lower() != 'windows':
+            return
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                raise OSError("GetConsoleMode failed")
+            # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        except Exception:
+            cls.disable()
+
+    @classmethod
+    def disable(cls):
+        for attr in dir(cls):
+            if attr.isupper() and isinstance(getattr(cls, attr), str):
+                setattr(cls, attr, '')
 
 
 # ============================================================
@@ -34,12 +86,34 @@ warnings.filterwarnings("ignore")
 # ============================================================
 
 @dataclass
+class StageStats:
+    """Statistics for a single stage (DNS, Connect, TTFB, Total)."""
+    avg: Optional[float] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    p50: Optional[float] = None
+    p95: Optional[float] = None
+    p99: Optional[float] = None
+    samples: int = 0
+
+
+@dataclass
 class PingResult:
-    """Complete result of a single ping test"""
+    """Complete result of a single ping test."""
     target: str
-    success: bool
     method: str
+
+    # --- Test outcome (three independent flags) ---
+    reachable: bool = False               # Host responded at network level
+    test_success: bool = False            # Test completed without transport error
+    application_ok: Optional[bool] = None # HTTP: 2xx/3xx=True, 4xx/5xx=False
+
+    # --- Raw samples ---
     times: List[float] = field(default_factory=list)
+    attempts: int = 0
+    successes: int = 0
+
+    # --- Latency statistics (ms) ---
     avg: Optional[float] = None
     min: Optional[float] = None
     max: Optional[float] = None
@@ -47,19 +121,33 @@ class PingResult:
     p50: Optional[float] = None
     p95: Optional[float] = None
     p99: Optional[float] = None
+
+    # --- Loss ---
     packet_loss: float = 100.0
+
+    # --- Status ---
     status: str = 'Failed'
     error: Optional[str] = None
     resolved_ip: Optional[str] = None
+    ip_family: Optional[str] = None       # 'IPv4' or 'IPv6'
     rank: Optional[int] = None
+
+    # --- Scoring (custom heuristic, not a standard metric) ---
     score: Optional[float] = None
     grade: Optional[str] = None
-    dns_time: Optional[float] = None
-    connect_time: Optional[float] = None
+
+    # --- Stage timings (all ms) ---
+    dns: StageStats = field(default_factory=StageStats)
+    connect: StageStats = field(default_factory=StageStats)
+    ttfb: StageStats = field(default_factory=StageStats)
+    total: StageStats = field(default_factory=StageStats)
+
+    # --- HTTP specific ---
     http_status: Optional[int] = None
-    tls_time: Optional[float] = None
-    ttfb: Optional[float] = None
-    total_time: Optional[float] = None
+    http_status_text: Optional[str] = None
+    http_status_distribution: Optional[Dict[int, int]] = None
+
+    # --- Port ---
     port: Optional[int] = None
 
 
@@ -68,135 +156,136 @@ class PingResult:
 # ============================================================
 
 class StatisticsEngine:
-    """Professional statistics calculations"""
-    
+
     @staticmethod
-    def calculate_percentiles(times: List[float]) -> Dict[str, Optional[float]]:
-        """Calculate P50, P95, P99 using proper statistics"""
+    def percentiles(times: List[float]) -> Dict[str, Optional[float]]:
         if not times:
             return {'p50': None, 'p95': None, 'p99': None}
-        
-        sorted_times = sorted(times)
-        n = len(sorted_times)
-        
-        def percentile(p: float) -> Optional[float]:
-            if n == 0:
-                return None
+
+        s = sorted(times)
+        n = len(s)
+
+        def pct(p: float) -> float:
             if n == 1:
-                return sorted_times[0]
-            
-            # Linear interpolation between closest ranks
-            rank = (n - 1) * p / 100
-            lower = int(rank)
-            upper = lower + 1
-            if upper >= n:
-                return sorted_times[-1]
-            weight = rank - lower
-            return sorted_times[lower] * (1 - weight) + sorted_times[upper] * weight
-        
+                return s[0]
+            rank = (n - 1) * p / 100.0
+            lo = int(rank)
+            hi = min(lo + 1, n - 1)
+            w = rank - lo
+            return s[lo] * (1 - w) + s[hi] * w
+
         return {
-            'p50': round(percentile(50), 1) if n >= 2 else None,
-            'p95': round(percentile(95), 1) if n >= 5 else None,
-            'p99': round(percentile(99), 1) if n >= 10 else None
+            'p50': round(pct(50), 1),
+            'p95': round(pct(95), 1),
+            'p99': round(pct(99), 1),
         }
-    
+
     @staticmethod
-    def calculate_stats(times: List[float]) -> Dict[str, Any]:
-        """Calculate all basic statistics"""
+    def basic_stats(times: List[float]) -> Dict[str, Any]:
         if not times:
             return {}
-        
-        result = {
+        out = {
             'avg': round(sum(times) / len(times), 1),
             'min': round(min(times), 1),
             'max': round(max(times), 1),
         }
-        
         if len(times) > 1:
-            jitter_values = [abs(times[i] - times[i-1]) for i in range(1, len(times))]
-            result['jitter'] = round(sum(jitter_values) / len(jitter_values), 1)
+            jitter_vals = [abs(times[i] - times[i - 1]) for i in range(1, len(times))]
+            out['jitter'] = round(sum(jitter_vals) / len(jitter_vals), 1)
         else:
-            result['jitter'] = 0.0
-        
-        percentiles = StatisticsEngine.calculate_percentiles(times)
-        result.update(percentiles)
-        
-        return result
-    
+            out['jitter'] = 0.0
+        out.update(StatisticsEngine.percentiles(times))
+        return out
+
     @staticmethod
-    def calculate_score(result: PingResult) -> float:
-        """Multi-factor scoring: 0-100"""
-        if not result.success:
+    def stage_stats(samples: List[float]) -> StageStats:
+        if not samples:
+            return StageStats()
+        st = StatisticsEngine.basic_stats(samples)
+        return StageStats(
+            avg=st.get('avg'), min=st.get('min'), max=st.get('max'),
+            p50=st.get('p50'), p95=st.get('p95'), p99=st.get('p99'),
+            samples=len(samples),
+        )
+
+    @staticmethod
+    def calculate_score(r: PingResult) -> float:
+        """
+        Custom diagnostic score (0-100).
+
+        This is a heuristic designed for comparing results WITHIN this tool.
+        It is NOT an industry-standard network benchmark and should not be
+        compared against external tools' scores.
+        """
+        if not r.test_success:
             return 0.0
-        
-        # Base score from latency (lower is better)
-        if result.avg is None:
-            latency_score = 0
-        elif result.avg <= 10:
-            latency_score = 100
-        elif result.avg <= 25:
-            latency_score = 90
-        elif result.avg <= 50:
-            latency_score = 80
-        elif result.avg <= 100:
-            latency_score = 65
-        elif result.avg <= 200:
-            latency_score = 45
-        elif result.avg <= 500:
-            latency_score = 25
+
+        # Latency component (35%)
+        if r.avg is None:
+            latency = 0
+        elif r.avg <= 10:
+            latency = 100
+        elif r.avg <= 25:
+            latency = 90
+        elif r.avg <= 50:
+            latency = 80
+        elif r.avg <= 100:
+            latency = 65
+        elif r.avg <= 200:
+            latency = 45
+        elif r.avg <= 500:
+            latency = 25
         else:
-            latency_score = 10
-        
-        # Packet loss penalty
-        if result.packet_loss == 0:
-            loss_score = 100
-        elif result.packet_loss <= 1:
-            loss_score = 95
-        elif result.packet_loss <= 5:
-            loss_score = 75
-        elif result.packet_loss <= 10:
-            loss_score = 50
-        elif result.packet_loss <= 20:
-            loss_score = 25
+            latency = 10
+
+        # Loss component (30%)
+        if r.packet_loss == 0:
+            loss = 100
+        elif r.packet_loss <= 1:
+            loss = 95
+        elif r.packet_loss <= 5:
+            loss = 75
+        elif r.packet_loss <= 10:
+            loss = 50
+        elif r.packet_loss <= 20:
+            loss = 25
         else:
-            loss_score = 5
-        
-        # Jitter penalty
-        if result.jitter is None:
-            jitter_score = 50
-        elif result.jitter <= 2:
-            jitter_score = 100
-        elif result.jitter <= 5:
-            jitter_score = 85
-        elif result.jitter <= 10:
-            jitter_score = 65
-        elif result.jitter <= 20:
-            jitter_score = 40
+            loss = 5
+
+        # Jitter component (25%)
+        if r.jitter is None:
+            jitter = 50
+        elif r.jitter <= 2:
+            jitter = 100
+        elif r.jitter <= 5:
+            jitter = 85
+        elif r.jitter <= 10:
+            jitter = 65
+        elif r.jitter <= 20:
+            jitter = 40
         else:
-            jitter_score = 15
-        
-        # P95 penalty
+            jitter = 15
+
+        # P95 tail penalty
         p95_penalty = 1.0
-        if result.p95 and result.avg:
-            p95_ratio = result.p95 / result.avg
-            if p95_ratio > 3:
+        if r.p95 and r.avg:
+            ratio = r.p95 / r.avg
+            if ratio > 3:
                 p95_penalty = 0.70
-            elif p95_ratio > 2:
+            elif ratio > 2:
                 p95_penalty = 0.85
-        
-        # HTTP status penalty (if applicable)
-        http_penalty = 1.0
-        if result.http_status:
-            if 200 <= result.http_status < 400:
-                http_penalty = 1.0
-            elif 400 <= result.http_status < 500:
-                http_penalty = 0.70
-            elif 500 <= result.http_status < 600:
-                http_penalty = 0.40
-        
-        final_score = (latency_score * 0.35 + loss_score * 0.30 + jitter_score * 0.25) * p95_penalty * http_penalty
-        return round(max(0, min(100, final_score)), 1)
-    
+
+        # HTTP application penalty (only if server returned an error status)
+        app_penalty = 1.0
+        if r.application_ok is False and r.http_status:
+            if 400 <= r.http_status < 500:
+                app_penalty = 0.70
+            elif 500 <= r.http_status < 600:
+                app_penalty = 0.40
+
+        final = (latency * 0.35 + loss * 0.30 + jitter * 0.25) * p95_penalty * app_penalty
+        return round(max(0.0, min(100.0, final)), 1)
+
     @staticmethod
     def get_grade(score: float) -> str:
         if score >= 90:
@@ -216,34 +305,59 @@ class StatisticsEngine:
 # ============================================================
 
 class DNSResolver:
-    """DNS resolution with timing"""
-    
+    """
+    DNS resolver with a timeout guard.
+
+    Note: socket.getaddrinfo() cannot be interrupted mid-call. This
+    function uses a daemon thread and joins with a timeout, so from the
+    caller's perspective the resolution "gives up" after `timeout` seconds,
+    even if the underlying OS resolver continues in the background.
+    """
+
     @staticmethod
-    def resolve(host: str, timeout: int = 5) -> Tuple[Optional[str], Optional[float], Optional[str]]:
-        """Resolve host to IP with timing"""
-        try:
-            start = time.perf_counter()
-            addrs = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-            elapsed = (time.perf_counter() - start) * 1000
-            
-            if not addrs:
-                return None, elapsed, None
-            
-            # Get first IPv4 address if available, otherwise first address
-            ip = None
-            for addr in addrs:
-                if addr[0] == socket.AF_INET:
-                    ip = addr[4][0]
-                    break
-            if not ip:
-                ip = addrs[0][4][0]
-            
-            return ip, round(elapsed, 1), None
-            
-        except socket.gaierror as e:
-            return None, None, str(e)
-        except Exception as e:
-            return None, None, str(e)
+    def resolve(host: str, timeout: float = 5.0
+                ) -> Tuple[Optional[str], Optional[str], Optional[float], Optional[str]]:
+        """
+        Returns (ip, family, elapsed_ms, error).
+        family is 'IPv4' or 'IPv6'.
+        """
+        result: Dict[str, Any] = {'ip': None, 'family': None, 'elapsed': None, 'error': None}
+
+        def worker():
+            try:
+                start = time.perf_counter()
+                infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+                elapsed = (time.perf_counter() - start) * 1000
+                result['elapsed'] = round(elapsed, 1)
+
+                if not infos:
+                    result['error'] = 'No addresses'
+                    return
+
+                # Prefer IPv4, fall back to IPv6
+                chosen = None
+                for info in infos:
+                    if info[0] == socket.AF_INET:
+                        chosen = info
+                        break
+                if chosen is None:
+                    chosen = infos[0]
+
+                result['ip'] = chosen[4][0]
+                result['family'] = 'IPv4' if chosen[0] == socket.AF_INET else 'IPv6'
+            except socket.gaierror as e:
+                result['error'] = str(e)
+            except Exception as e:
+                result['error'] = str(e)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout)
+
+        if t.is_alive():
+            return None, None, None, f'DNS timeout after {timeout}s'
+
+        return result['ip'], result['family'], result['elapsed'], result['error']
 
 
 # ============================================================
@@ -251,447 +365,500 @@ class DNSResolver:
 # ============================================================
 
 class PingEngine:
-    """Complete ping engine with all methods"""
-    
-    # Proxy settings
-    PROXY_TYPE = None
-    PROXY_HOST = None
-    PROXY_PORT = None
-    PROXY_USER = None
-    PROXY_PASS = None
-    
-    # Windows compatibility
-    NULL_DEVICE = 'nul' if platform.system().lower() == 'windows' else '/dev/null'
-    
+    """
+    Proxy notes:
+      - Proxy applies to HTTP method only.
+      - ICMP is a raw protocol and cannot traverse HTTP/SOCKS proxies.
+      - TCP currently does not route through proxy (would require SOCKS handshake).
+    """
+
+    PROXY_URL: Optional[str] = None
+    PROXY_USER: Optional[str] = None
+    PROXY_PASS: Optional[str] = None
+
+    NULL_DEVICE = 'NUL' if platform.system().lower() == 'windows' else '/dev/null'
+
     @staticmethod
-    def set_proxy(proxy_type: str, host: str, port: int, user: str = None, password: str = None):
-        PingEngine.PROXY_TYPE = proxy_type
-        PingEngine.PROXY_HOST = host
-        PingEngine.PROXY_PORT = port
+    def set_proxy(url: str, user: Optional[str] = None, password: Optional[str] = None):
+        PingEngine.PROXY_URL = url
         PingEngine.PROXY_USER = user
         PingEngine.PROXY_PASS = password
-    
+
     @staticmethod
     def clear_proxy():
-        PingEngine.PROXY_TYPE = None
-        PingEngine.PROXY_HOST = None
-        PingEngine.PROXY_PORT = None
+        PingEngine.PROXY_URL = None
         PingEngine.PROXY_USER = None
         PingEngine.PROXY_PASS = None
-    
+
     @staticmethod
-    def get_system():
-        return platform.system().lower()
-    
+    def _build_proxy_url() -> Optional[str]:
+        """Build curl-compatible proxy URL. Handles IPv6 and full URL-encoding of credentials."""
+        if not PingEngine.PROXY_URL:
+            return None
+
+        parsed = urlparse(PingEngine.PROXY_URL)
+        scheme = parsed.scheme
+        host = parsed.hostname
+        port = parsed.port
+        if not scheme or not host or not port:
+            return PingEngine.PROXY_URL  # let curl handle / complain
+
+        # Wrap IPv6 in brackets
+        if ':' in host and not host.startswith('['):
+            host_part = f"[{host}]"
+        else:
+            host_part = host
+
+        auth = ''
+        if PingEngine.PROXY_USER and PingEngine.PROXY_PASS:
+            user = quote(PingEngine.PROXY_USER, safe='')
+            pw = quote(PingEngine.PROXY_PASS, safe='')
+            auth = f"{user}:{pw}@"
+
+        return f"{scheme}://{auth}{host_part}:{port}"
+
     @staticmethod
-    def ping_icmp(host: str, count: int, timeout: int, stop_event: threading.Event) -> PingResult:
-        """Standard ICMP ping with proper packet loss"""
-        result = PingResult(target=host, success=False, method='ICMP')
-        process = None
-        
-        try:
-            # DNS resolution
-            ip, dns_time, dns_error = DNSResolver.resolve(host, timeout)
-            result.dns_time = dns_time
-            
-            if dns_error:
-                result.error = f'DNS Error: {dns_error}'
-                result.status = 'DNS Error'
-                return result
-            
-            result.resolved_ip = ip
-            
-            # Build ping command
-            system = PingEngine.get_system()
-            if system == 'windows':
-                cmd = ['ping', '-n', str(count), '-w', str(int(timeout * 1000)), host]
-            elif system == 'darwin':
-                cmd = ['ping', '-c', str(count), '-W', str(timeout * 1000), host]
-            else:
-                cmd = ['ping', '-c', str(count), '-W', str(timeout), host]
-            
-            # Run with Popen for proper stop
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+    def _finalize(r: PingResult):
+        """Compute stats, score, grade, and set default status."""
+        if not r.times:
+            r.packet_loss = 100.0
+            if r.status == 'OK':
+                r.status = 'Failed'
+            return
+
+        st = StatisticsEngine.basic_stats(r.times)
+        r.avg = st.get('avg')
+        r.min = st.get('min')
+        r.max = st.get('max')
+        r.jitter = st.get('jitter')
+        r.p50 = st.get('p50')
+        r.p95 = st.get('p95')
+        r.p99 = st.get('p99')
+
+        if r.attempts > 0:
+            r.packet_loss = round(
+                ((r.attempts - r.successes) / r.attempts) * 100.0, 1
             )
-            
-            start_time = time.time()
-            process_timeout = count * timeout + 10
-            
+
+        r.score = StatisticsEngine.calculate_score(r)
+        r.grade = StatisticsEngine.get_grade(r.score)
+
+        if r.status in ('OK', '') or r.status is None:
+            if r.packet_loss == 0:
+                r.status = 'OK'
+            elif r.packet_loss < 20:
+                r.status = 'Partial'
+            else:
+                r.status = 'High Loss'
+
+    # ------------------------------------------------------------------
+    # ICMP
+    # ------------------------------------------------------------------
+    @staticmethod
+    def ping_icmp(host: str, count: int, timeout: float,
+                  stop_event: threading.Event) -> PingResult:
+        r = PingResult(target=host, method='ICMP')
+        r.attempts = count
+
+        ip, family, dns_ms, dns_err = DNSResolver.resolve(host, timeout)
+        if dns_ms is not None:
+            r.dns = StageStats(avg=dns_ms, min=dns_ms, max=dns_ms,
+                               p50=dns_ms, p95=dns_ms, p99=dns_ms, samples=1)
+        if dns_err:
+            r.error = f'DNS: {dns_err}'
+            r.status = 'DNS Error'
+            return r
+        r.resolved_ip = ip
+        r.ip_family = family
+
+        system = platform.system().lower()
+        # Round timeout to nearest 0.1s to preserve precision from CLI
+        if system == 'windows':
+            w_ms = max(1, int(round(timeout * 1000)))
+            cmd = ['ping', '-n', str(count), '-w', str(w_ms), host]
+        elif system == 'darwin':
+            # macOS -W is in milliseconds
+            w_ms = max(1, int(round(timeout * 1000)))
+            cmd = ['ping', '-c', str(count), '-W', str(w_ms), host]
+        else:
+            # Linux iputils: -W is in seconds, accepts floats
+            cmd = ['ping', '-c', str(count), '-W', f'{timeout:.2f}', host]
+
+        process = None
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+
+            start = time.time()
+            overall = count * timeout + 10
+
             while process.poll() is None:
                 if stop_event.is_set():
                     process.kill()
                     process.wait()
-                    result.error = 'Cancelled'
-                    result.status = 'Cancelled'
-                    return result
-                
-                if time.time() - start_time > process_timeout:
+                    r.error = 'Cancelled'
+                    r.status = 'Cancelled'
+                    return r
+                if time.time() - start > overall:
                     process.kill()
                     process.wait()
-                    result.error = 'Timeout'
-                    result.status = 'Timeout'
-                    return result
-                
+                    r.error = 'Timeout'
+                    r.status = 'Timeout'
+                    return r
                 time.sleep(0.05)
-            
+
             stdout, stderr = process.communicate()
             output = stdout + stderr
-            
-            # Parse times
-            times = []
-            pattern = r'time[=<]\s*(\d+(?:[.,]\d+)?)\s*ms'
-            matches = re.findall(pattern, output, re.IGNORECASE)
-            
-            if matches:
-                for t in matches:
+
+            times: List[float] = []
+            for pattern in (
+                r'time[=<]\s*(\d+(?:[.,]\d+)?)\s*ms',
+                r'(\d+(?:[.,]\d+)?)\s*ms',
+            ):
+                for m in re.findall(pattern, output, re.IGNORECASE):
                     try:
-                        val = float(t.replace(',', '.'))
-                        if 0 <= val <= 10000:
-                            times.append(val)
+                        v = float(m.replace(',', '.'))
+                        if 0 <= v <= 10000:
+                            times.append(v)
                     except ValueError:
                         continue
-            
+                if times:
+                    break
+
             if not times:
-                pattern2 = r'(\d+(?:[.,]\d+)?)\s*ms'
-                matches2 = re.findall(pattern2, output, re.IGNORECASE)
-                if matches2:
-                    for t in matches2:
-                        try:
-                            val = float(t.replace(',', '.'))
-                            if 0 <= val <= 10000:
-                                times.append(val)
-                        except ValueError:
-                            continue
-            
-            if not times:
-                error_lower = output.lower()
-                if "unreachable" in error_lower:
-                    result.error = 'Host unreachable'
-                    result.status = 'Unreachable'
-                elif "could not find host" in error_lower or "unknown host" in error_lower:
-                    result.error = 'DNS resolution failed'
-                    result.status = 'DNS Error'
-                elif "timed out" in error_lower or "timeout" in error_lower:
-                    result.error = 'Request timeout'
-                    result.status = 'Timeout'
+                lower = output.lower()
+                if 'unreachable' in lower:
+                    r.error, r.status = 'Host unreachable', 'Unreachable'
+                elif 'could not find host' in lower or 'unknown host' in lower:
+                    r.error, r.status = 'DNS resolution failed', 'DNS Error'
+                elif 'timed out' in lower or 'timeout' in lower:
+                    r.error, r.status = 'Request timeout', 'Timeout'
                 else:
-                    result.error = 'No response'
-                    result.status = 'No Response'
-                return result
-            
-            result.success = True
-            result.times = times
-            
-            # Calculate packet loss
-            packet_loss = ((count - len(times)) / count) * 100
-            result.packet_loss = round(min(packet_loss, 100.0), 1)
-            result.status = 'OK' if result.packet_loss < 20 else 'High Loss'
-            
-            # Statistics
-            stats = StatisticsEngine.calculate_stats(times)
-            result.avg = stats.get('avg')
-            result.min = stats.get('min')
-            result.max = stats.get('max')
-            result.jitter = stats.get('jitter')
-            result.p50 = stats.get('p50')
-            result.p95 = stats.get('p95')
-            result.p99 = stats.get('p99')
-            
-            # Score
-            result.score = StatisticsEngine.calculate_score(result)
-            result.grade = StatisticsEngine.get_grade(result.score)
-            
-            return result
-            
+                    r.error, r.status = 'No response', 'No Response'
+                return r
+
+            r.reachable = True
+            r.test_success = True
+            r.times = times
+            r.successes = len(times)
+            r.status = 'OK'
+            PingEngine._finalize(r)
+            return r
+
         except Exception as e:
             if process:
                 try:
                     process.kill()
-                except:
+                except Exception:
                     pass
-            result.error = str(e)[:50]
-            result.status = 'Error'
-            return result
-    
+            r.error = str(e)[:80]
+            r.status = 'Error'
+            return r
+
+    # ------------------------------------------------------------------
+    # TCP
+    # ------------------------------------------------------------------
     @staticmethod
-    def ping_tcp(host: str, port: int, count: int, timeout: int, stop_event: threading.Event) -> PingResult:
-        """Real TCP connection test"""
-        result = PingResult(target=host, success=False, method=f'TCP:{port}')
-        result.port = port
-        
-        # DNS resolution
-        ip, dns_time, dns_error = DNSResolver.resolve(host, timeout)
-        result.dns_time = dns_time
-        
-        if dns_error:
-            result.error = f'DNS Error: {dns_error}'
-            result.status = 'DNS Error'
-            return result
-        
-        result.resolved_ip = ip
-        
-        times = []
-        successful = 0
-        max_attempts = min(count, 20)
-        
-        for i in range(max_attempts):
+    def ping_tcp(host: str, port: int, count: int, timeout: float,
+                 stop_event: threading.Event) -> PingResult:
+        r = PingResult(target=host, method=f'TCP:{port}')
+        r.port = port
+        r.attempts = count
+
+        ip, family, dns_ms, dns_err = DNSResolver.resolve(host, timeout)
+        if dns_ms is not None:
+            r.dns = StageStats(avg=dns_ms, min=dns_ms, max=dns_ms,
+                               p50=dns_ms, p95=dns_ms, p99=dns_ms, samples=1)
+        if dns_err:
+            r.error = f'DNS: {dns_err}'
+            r.status = 'DNS Error'
+            return r
+        r.resolved_ip = ip
+        r.ip_family = family
+
+        af = socket.AF_INET6 if family == 'IPv6' else socket.AF_INET
+
+        times: List[float] = []
+        connect_samples: List[float] = []
+        refused = 0
+        timeouts = 0
+        errors = 0
+
+        for _ in range(count):
             if stop_event.is_set():
-                result.error = 'Cancelled'
-                result.status = 'Cancelled'
-                return result
-            
+                r.error = 'Cancelled'
+                r.status = 'Cancelled'
+                return r
+
             try:
                 start = time.perf_counter()
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock = socket.socket(af, socket.SOCK_STREAM)
                 sock.settimeout(timeout)
-                
                 try:
-                    sock.connect((host, port))
+                    # Connect to the exact IP that the DNS stage resolved.
+                    # This makes DNS-stage measurement and TCP connect
+                    # part of the same, consistent connection attempt.
+                    if family == 'IPv6':
+                        sock.connect((ip, port, 0, 0))
+                    else:
+                        sock.connect((ip, port))
                     elapsed = (time.perf_counter() - start) * 1000
                     times.append(elapsed)
-                    successful += 1
-                    sock.close()
-                    
-                except socket.timeout:
-                    sock.close()
-                    continue
-                    
+                    connect_samples.append(elapsed)
+                    r.successes += 1
                 except ConnectionRefusedError:
-                    sock.close()
-                    # Host is reachable but port is closed
-                    result.error = 'Port closed (host reachable)'
-                    result.status = 'Refused'
-                    result.success = True
-                    result.packet_loss = 100.0
-                    result.score = 0
-                    result.grade = 'Poor'
-                    return result
-                    
+                    refused += 1
+                except socket.timeout:
+                    timeouts += 1
                 except socket.gaierror:
-                    sock.close()
-                    result.error = 'DNS resolution failed'
-                    result.status = 'DNS Error'
-                    return result
-                    
-                except OSError as e:
-                    sock.close()
-                    if "timed out" in str(e).lower():
-                        continue
-                    continue
-                    
-                except Exception:
-                    sock.close()
-                    continue
-                    
+                    errors += 1
+                except OSError:
+                    errors += 1
+                finally:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
             except Exception:
+                errors += 1
                 continue
-        
-        if not times:
-            result.error = 'No TCP connection'
-            result.status = 'Failed'
-            return result
-        
-        result.success = True
-        result.times = times
-        
-        packet_loss = ((max_attempts - successful) / max_attempts) * 100
-        result.packet_loss = round(packet_loss, 1)
-        result.status = 'OK' if result.packet_loss < 20 else 'High Loss'
-        
-        stats = StatisticsEngine.calculate_stats(times)
-        result.avg = stats.get('avg')
-        result.min = stats.get('min')
-        result.max = stats.get('max')
-        result.jitter = stats.get('jitter')
-        result.p50 = stats.get('p50')
-        result.p95 = stats.get('p95')
-        result.p99 = stats.get('p99')
-        
-        result.connect_time = result.avg
-        
-        result.score = StatisticsEngine.calculate_score(result)
-        result.grade = StatisticsEngine.get_grade(result.score)
-        
-        return result
-    
+
+        if times:
+            r.reachable = True
+            r.test_success = True
+            r.status = 'OK'
+            r.connect = StatisticsEngine.stage_stats(connect_samples)
+            PingEngine._finalize(r)
+            return r
+
+        if refused > 0:
+            # Host is reachable but port is closed
+            r.reachable = True
+            r.test_success = False
+            r.status = 'Refused'
+            r.error = 'Port closed (host reachable)'
+            r.packet_loss = 100.0
+            r.score = 0.0
+            r.grade = 'Poor'
+            return r
+
+        if timeouts > 0:
+            r.status = 'Timeout'
+            r.error = 'Connection timeout'
+        elif errors > 0:
+            r.status = 'Error'
+            r.error = 'Connection error'
+        else:
+            r.status = 'Failed'
+            r.error = 'No TCP connection'
+
+        return r
+
+    # ------------------------------------------------------------------
+    # HTTP
+    # ------------------------------------------------------------------
     @staticmethod
-    def ping_http(target_info: Dict[str, Any], count: int, timeout: int, stop_event: threading.Event) -> PingResult:
-        """Real HTTP/HTTPS test with curl"""
-        host = target_info['host']
-        scheme = target_info.get('scheme', 'https')
-        port = target_info.get('port')
-        path = target_info.get('path', '/')
-        query = target_info.get('query', '')
-        
-        result = PingResult(target=host, success=False, method='HTTP')
-        result.port = port
-        
-        # DNS resolution
-        ip, dns_time, dns_error = DNSResolver.resolve(host, timeout)
-        result.dns_time = dns_time
-        
-        if dns_error:
-            result.error = f'DNS Error: {dns_error}'
-            result.status = 'DNS Error'
-            return result
-        
-        result.resolved_ip = ip
-        
-        # Check curl
+    def ping_http(target: Dict[str, Any], count: int, timeout: float,
+                  stop_event: threading.Event) -> PingResult:
+        host = target['host']
+        scheme = target.get('scheme') or 'https'
+        port = target.get('port')
+        path = target.get('path') or '/'
+        query = target.get('query') or ''
+
+        r = PingResult(target=host, method='HTTP')
+        r.port = port
+        r.attempts = count
+
+        # DNS measured separately. curl performs its own DNS internally.
+        ip, family, dns_ms, dns_err = DNSResolver.resolve(host, timeout)
+        if dns_ms is not None:
+            r.dns = StageStats(avg=dns_ms, min=dns_ms, max=dns_ms,
+                               p50=dns_ms, p95=dns_ms, p99=dns_ms, samples=1)
+        if dns_err:
+            r.error = f'DNS: {dns_err}'
+            r.status = 'DNS Error'
+            return r
+        r.resolved_ip = ip
+        r.ip_family = family
+
         try:
-            subprocess.run(['curl', '--version'], capture_output=True, timeout=1)
-        except:
-            result.error = 'curl not installed (required for HTTP)'
-            result.status = 'Error'
-            return result
-        
-        # Build URL
+            subprocess.run(['curl', '--version'],
+                           capture_output=True, timeout=2, check=True)
+        except Exception:
+            r.error = 'curl not installed (required for HTTP)'
+            r.status = 'Error'
+            return r
+
         url = f"{scheme}://{host}"
         if port:
             url += f":{port}"
         url += path
         if query:
             url += f"?{query}"
-        
-        times = []
-        successful = 0
-        max_attempts = min(count, 20)
-        status_codes = []
-        
-        for i in range(max_attempts):
+
+        # Safe delimiter. curl expands %% to a literal %, so we use '|'.
+        curl_fmt = '%{time_total}|%{http_code}|%{time_connect}|%{time_starttransfer}'
+
+        total_samples: List[float] = []
+        connect_samples: List[float] = []
+        ttfb_samples: List[float] = []
+        status_codes: List[int] = []
+
+        proxy_url = PingEngine._build_proxy_url()
+        # Preserve sub-second timeout precision for curl.
+        timeout_str = f'{timeout:.2f}'
+
+        for _ in range(count):
             if stop_event.is_set():
-                result.error = 'Cancelled'
-                result.status = 'Cancelled'
-                return result
-            
-            # curl command with Windows compatibility
+                r.error = 'Cancelled'
+                r.status = 'Cancelled'
+                return r
+
             cmd = [
                 'curl', '-s', '-o', PingEngine.NULL_DEVICE,
-                '-w', '%{time_total}%%%{http_code}%%%{time_connect}%%%{time_starttransfer}',
-                '--connect-timeout', str(timeout),
-                '--max-time', str(timeout)
+                '-w', curl_fmt,
+                '--connect-timeout', timeout_str,
+                '--max-time', timeout_str,
             ]
-            
-            # Add proxy if configured
-            if PingEngine.PROXY_TYPE and PingEngine.PROXY_HOST and PingEngine.PROXY_PORT:
-                proxy_url = f"{PingEngine.PROXY_TYPE}://{PingEngine.PROXY_HOST}:{PingEngine.PROXY_PORT}"
-                if PingEngine.PROXY_USER and PingEngine.PROXY_PASS:
-                    # URL encode credentials
-                    user = PingEngine.PROXY_USER.replace('@', '%40').replace(':', '%3A')
-                    passwd = PingEngine.PROXY_PASS.replace('@', '%40').replace(':', '%3A')
-                    proxy_url = f"{PingEngine.PROXY_TYPE}://{user}:{passwd}@{PingEngine.PROXY_HOST}:{PingEngine.PROXY_PORT}"
+            if proxy_url:
                 cmd.extend(['-x', proxy_url])
-            
             cmd.append(url)
-            
+
             process = None
-            
             try:
                 process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
                 )
-                
-                start_time = time.time()
-                process_timeout = timeout + 5
-                
+                start = time.time()
+                overall = timeout + 5
                 while process.poll() is None:
                     if stop_event.is_set():
                         process.kill()
                         process.wait()
-                        result.error = 'Cancelled'
-                        result.status = 'Cancelled'
-                        return result
-                    
-                    if time.time() - start_time > process_timeout:
+                        r.error = 'Cancelled'
+                        r.status = 'Cancelled'
+                        return r
+                    if time.time() - start > overall:
                         process.kill()
                         process.wait()
                         break
-                    
                     time.sleep(0.05)
-                
+
                 stdout, stderr = process.communicate()
-                
-                if stdout:
-                    parts = stdout.strip().split('%%%')
-                    if len(parts) == 4:
-                        try:
-                            total_time = float(parts[0]) * 1000
-                            http_code = int(parts[1])
-                            connect_time = float(parts[2]) * 1000 if parts[2] else None
-                            ttfb = float(parts[3]) * 1000 if parts[3] else None
-                            
-                            if 0 <= total_time <= 10000:
-                                times.append(total_time)
-                                successful += 1
-                                status_codes.append(http_code)
-                                result.connect_time = connect_time
-                                result.ttfb = ttfb
-                        except ValueError:
-                            continue
-                            
+
+                # curl reports failure via non-zero exit code (connection
+                # refused, DNS failure, TLS error, timeout, proxy failure).
+                # These must NOT be counted as successful samples.
+                if process.returncode != 0:
+                    continue
+
+                if not stdout:
+                    continue
+
+                parts = stdout.strip().split('|')
+                if len(parts) != 4:
+                    continue
+
+                try:
+                    total_s = float(parts[0])
+                    code = int(parts[1])
+                    connect_s = float(parts[2]) if parts[2] else 0.0
+                    ttfb_s = float(parts[3]) if parts[3] else 0.0
+                except ValueError:
+                    continue
+
+                # HTTP code 000 means curl could not complete a request.
+                # Not a success.
+                if code <= 0:
+                    continue
+
+                total_ms = total_s * 1000.0
+                # 0.000000 means curl never connected.
+                if not (0 < total_ms <= 60000):
+                    continue
+
+                total_samples.append(total_ms)
+                r.successes += 1
+                status_codes.append(code)
+
+                if connect_s > 0:
+                    connect_samples.append(connect_s * 1000.0)
+                if ttfb_s > 0:
+                    ttfb_samples.append(ttfb_s * 1000.0)
+
             except Exception:
                 if process:
                     try:
                         process.kill()
-                    except:
+                    except Exception:
                         pass
                 continue
-        
-        if not times:
-            result.error = 'No HTTP response'
-            result.status = 'Failed'
-            return result
-        
-        result.success = True
-        result.times = times
-        result.http_status = status_codes[-1] if status_codes else None
-        
-        packet_loss = ((max_attempts - successful) / max_attempts) * 100
-        result.packet_loss = round(packet_loss, 1)
-        
-        # Determine status based on HTTP status code
-        if result.http_status:
-            if 200 <= result.http_status < 400:
-                result.status = 'OK'
-            elif 400 <= result.http_status < 500:
-                result.status = f'Client Error {result.http_status}'
-            elif 500 <= result.http_status < 600:
-                result.status = f'Server Error {result.http_status}'
+
+        if not total_samples:
+            r.error = 'No HTTP response'
+            r.status = 'Failed'
+            return r
+
+        r.reachable = True
+        r.test_success = True
+        r.times = total_samples
+
+        r.connect = StatisticsEngine.stage_stats(connect_samples)
+        r.ttfb = StatisticsEngine.stage_stats(ttfb_samples)
+        r.total = StatisticsEngine.stage_stats(total_samples)
+
+        if status_codes:
+            # Record full distribution, then pick a single representative
+            # status for the single-value field.
+            dist = Counter(status_codes)
+            r.http_status_distribution = dict(dist)
+
+            unique = list(dist.keys())
+            if len(unique) == 1:
+                r.http_status = unique[0]
             else:
-                result.status = f'HTTP {result.http_status}'
+                # Worst status wins (5xx > 4xx > 3xx > 2xx > 1xx)
+                r.http_status = max(unique)
+
+            r.http_status_text = {
+                200: 'OK', 201: 'Created', 204: 'No Content',
+                301: 'Moved Permanently', 302: 'Found',
+                304: 'Not Modified', 400: 'Bad Request',
+                401: 'Unauthorized', 403: 'Forbidden',
+                404: 'Not Found', 429: 'Too Many Requests',
+                500: 'Internal Server Error', 502: 'Bad Gateway',
+                503: 'Service Unavailable', 504: 'Gateway Timeout',
+            }.get(r.http_status, '')
+
+            r.application_ok = 200 <= r.http_status < 400
+
+            if r.application_ok and len(unique) == 1:
+                r.status = 'OK'
+            elif r.application_ok:
+                r.status = 'Mixed 2xx/3xx'
+            elif 400 <= r.http_status < 600:
+                txt = r.http_status_text or ''
+                r.status = f'HTTP {r.http_status} {txt}'.strip()
+            else:
+                r.status = f'HTTP {r.http_status}'
         else:
-            result.status = 'OK' if result.packet_loss < 20 else 'High Loss'
-        
-        stats = StatisticsEngine.calculate_stats(times)
-        result.avg = stats.get('avg')
-        result.min = stats.get('min')
-        result.max = stats.get('max')
-        result.jitter = stats.get('jitter')
-        result.p50 = stats.get('p50')
-        result.p95 = stats.get('p95')
-        result.p99 = stats.get('p99')
-        result.total_time = result.avg
-        
-        result.score = StatisticsEngine.calculate_score(result)
-        result.grade = StatisticsEngine.get_grade(result.score)
-        
-        return result
-    
+            r.status = 'OK'
+
+        PingEngine._finalize(r)
+        return r
+
+    # ------------------------------------------------------------------
+    # Dispatcher
+    # ------------------------------------------------------------------
     @staticmethod
-    def ping_host(target: Dict[str, Any], method: str, count: int, timeout: int, stop_event: threading.Event) -> PingResult:
-        """Ping host using selected method"""
+    def ping_host(target: Dict[str, Any], method: str, count: int, timeout: float,
+                  stop_event: threading.Event) -> PingResult:
         host = target['host']
-        
         if stop_event.is_set():
-            return PingResult(target=host, success=False, method='Cancelled', status='Cancelled')
-        
+            return PingResult(target=host, method=method, status='Cancelled')
+
         if method == 'ICMP':
             return PingEngine.ping_icmp(host, count, timeout, stop_event)
         elif method == 'TCP':
@@ -699,11 +866,11 @@ class PingEngine:
             return PingEngine.ping_tcp(host, port, count, timeout, stop_event)
         elif method == 'HTTP':
             return PingEngine.ping_http(target, count, timeout, stop_event)
-        else:
-            result = PingResult(target=host, success=False, method='Unknown')
-            result.error = 'Unknown method'
-            result.status = 'Error'
-            return result
+
+        r = PingResult(target=host, method=method)
+        r.error = 'Unknown method'
+        r.status = 'Error'
+        return r
 
 
 # ============================================================
@@ -711,980 +878,684 @@ class PingEngine:
 # ============================================================
 
 class TargetParser:
-    """Complete target parser with IPv6 support"""
-    
+
     @staticmethod
     def parse_target(value: str) -> Optional[Dict[str, Any]]:
         try:
             value = value.strip()
             if not value:
                 return None
-            
-            # Handle IPv6 addresses
+
+            # IPv6 with port: [::1]:8080
             if value.startswith('['):
-                # IPv6 with port: [::1]:8080
-                match = re.match(r'\[([0-9a-f:]+)\](?::(\d+))?', value)
-                if match:
-                    host = match.group(1)
-                    port = int(match.group(2)) if match.group(2) else None
+                m = re.match(r'\[([0-9a-fA-F:]+)\](?::(\d+))?$', value)
+                if m:
                     return {
-                        'host': host,
-                        'port': port,
+                        'host': m.group(1),
+                        'port': int(m.group(2)) if m.group(2) else None,
                         'scheme': None,
                         'path': '/',
                         'query': '',
-                        'raw': value
+                        'raw': value,
                     }
-            
-            # Add scheme if missing
-            if '://' not in value:
-                parsed = urlparse('//' + value)
-            else:
-                parsed = urlparse(value)
-            
+                return None
+
+            parsed = urlparse(value if '://' in value else '//' + value)
             host = parsed.hostname
             if not host:
                 return None
-            
+
             return {
                 'host': host.lower(),
                 'port': parsed.port,
                 'scheme': parsed.scheme or None,
                 'path': parsed.path or '/',
                 'query': parsed.query or '',
-                'raw': value
+                'raw': value,
             }
-        except:
+        except Exception:
             return None
-    
+
     @staticmethod
     def parse_sites(text: str) -> List[Dict[str, Any]]:
-        sites = []
-        for s in text.replace('،', ',').replace('\n', ',').split(','):
-            parsed = TargetParser.parse_target(s)
-            if parsed:
-                sites.append(parsed)
-        
-        # Remove duplicates
         seen = set()
-        unique_sites = []
-        for site in sites:
-            key = (site['scheme'], site['host'], site['port'], site['path'])
-            if key not in seen:
-                seen.add(key)
-                unique_sites.append(site)
-        
-        return unique_sites
+        out: List[Dict[str, Any]] = []
+        for chunk in text.replace('،', ',').replace('\n', ',').split(','):
+            parsed = TargetParser.parse_target(chunk)
+            if not parsed:
+                continue
+            key = (
+                parsed['scheme'],
+                parsed['host'],
+                parsed['port'],
+                parsed['path'],
+                parsed['query'],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(parsed)
+        return out
 
 
 # ============================================================
-# MAIN APPLICATION
+# PRETTY RENDERING
 # ============================================================
 
-class NetworkPingPro:
-    """Main application class"""
-    
-    VERSION = "2.0.0"
-    AUTHOR = "Erffan"
-    
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"Network Ping Pro v{self.VERSION}")
-        self.root.geometry("1500x950")
-        self.root.minsize(1100, 700)
-        self.root.configure(bg='white')
-        
-        self.running = False
+class Renderer:
+
+    @staticmethod
+    def visible_len(s: str) -> int:
+        return len(re.sub(r'\033\[[0-9;]*m', '', s))
+
+    @staticmethod
+    def pad(s: str, width: int, align: str = 'left') -> str:
+        n = Renderer.visible_len(s)
+        pad = max(0, width - n)
+        if align == 'right':
+            return ' ' * pad + s
+        if align == 'center':
+            left = pad // 2
+            right = pad - left
+            return ' ' * left + s + ' ' * right
+        return s + ' ' * pad
+
+    @staticmethod
+    def truncate(s: str, width: int) -> str:
+        if len(s) <= width:
+            return s
+        if width <= 1:
+            return s[:width]
+        return s[:width - 1] + '…'
+
+    @staticmethod
+    def banner():
+        title = f"Network Ping Pro v{__version__}"
+        sub = "Network Diagnostic Tool (CLI)"
+        author = f"Author: {__author__}"
+        width = max(len(title), len(sub), len(author)) + 4
+
+        top = '╔' + '═' * width + '╗'
+        bot = '╚' + '═' * width + '╝'
+
+        def line(text):
+            pad = width - len(text) - 2
+            return '║ ' + text + ' ' * pad + ' ║'
+
+        print(f"{Color.BOLD}{Color.CYAN}{top}")
+        print(f"{Color.BOLD}{Color.CYAN}{line(title)}")
+        print(f"{Color.RESET}{Color.CYAN}{line(sub)}")
+        print(f"{Color.RESET}{Color.GRAY}{line(author)}")
+        print(f"{Color.CYAN}{bot}{Color.RESET}")
+
+    @staticmethod
+    def progress(current: int, total: int, target: str, status: str):
+        bar_len = 22
+        filled = int(bar_len * current / total) if total else 0
+        bar = '█' * filled + '░' * (bar_len - filled)
+        sys.stdout.write(
+            f"\r  {Color.CYAN}[{bar}]{Color.RESET} "
+            f"{current:>{len(str(total))}}/{total}  "
+            f"{Renderer.truncate(target, 28):<28} "
+            f"{Color.DIM}{Renderer.truncate(status, 18):<18}{Color.RESET}"
+        )
+        sys.stdout.flush()
+
+    @staticmethod
+    def clear_line():
+        sys.stdout.write('\r' + ' ' * 110 + '\r')
+        sys.stdout.flush()
+
+    @staticmethod
+    def grade_color(grade: Optional[str]) -> str:
+        if grade == 'Excellent':
+            return Color.GREEN
+        if grade == 'Very Good':
+            return Color.CYAN
+        if grade == 'Good':
+            return Color.YELLOW
+        if grade == 'Fair':
+            return Color.MAGENTA
+        if grade in ('Poor', 'Failed'):
+            return Color.RED
+        return Color.RESET
+
+    @staticmethod
+    def status_color(status: str) -> str:
+        if status == 'OK':
+            return Color.GREEN
+        if status in ('Partial', 'High Loss'):
+            return Color.YELLOW
+        if status.startswith('HTTP 4') or status.startswith('HTTP 5'):
+            return Color.MAGENTA
+        if status == 'Cancelled':
+            return Color.GRAY
+        return Color.RED
+
+    @staticmethod
+    def latency_bar(value: Optional[float], max_value: float, width: int = 24) -> str:
+        if value is None or max_value <= 0:
+            return Color.DIM + '░' * width + Color.RESET
+        ratio = min(value / max_value, 1.0)
+        filled = int(round(ratio * width))
+        filled = max(1 if value > 0 else 0, filled)
+        bar = '█' * filled + '░' * (width - filled)
+        if value <= 50:
+            c = Color.GREEN
+        elif value <= 100:
+            c = Color.CYAN
+        elif value <= 200:
+            c = Color.YELLOW
+        elif value <= 500:
+            c = Color.MAGENTA
+        else:
+            c = Color.RED
+        return f"{c}{bar}{Color.RESET}"
+
+    @staticmethod
+    def print_results_table(results: List[PingResult]):
+        if not results:
+            return
+
+        cols = [
+            ('#',        3,  'right'),
+            ('Target',  28,  'left'),
+            ('Method',   9,  'left'),
+            ('Score',    5,  'right'),
+            ('Grade',   10,  'left'),
+            ('Avg ms',   8,  'right'),
+            ('Min',      7,  'right'),
+            ('Max',      7,  'right'),
+            ('Jitter',   7,  'right'),
+            ('P95',      7,  'right'),
+            ('Loss',     6,  'right'),
+            ('Status',  20,  'left'),
+        ]
+
+        head = '  '.join(
+            Renderer.pad(f"{Color.BOLD}{name}{Color.RESET}", w, a)
+            for name, w, a in cols
+        )
+        total_w = sum(w for _, w, _ in cols) + 2 * (len(cols) - 1)
+
+        print()
+        print(f"{Color.BOLD}{Color.BLUE}╭{'─' * total_w}╮{Color.RESET}")
+        print(f"{Color.BOLD}{Color.BLUE}│{Color.RESET} {head} {Color.BOLD}{Color.BLUE}│{Color.RESET}")
+        print(f"{Color.BOLD}{Color.BLUE}├{'─' * total_w}┤{Color.RESET}")
+
+        for r in results:
+            rank = str(r.rank) if r.rank else '·'
+
+            if r.test_success:
+                score = f"{r.score:.1f}" if r.score is not None else "0.0"
+                grade = r.grade or "Unknown"
+                avg = f"{r.avg:.1f}" if r.avg is not None else "—"
+                mn = f"{r.min:.1f}" if r.min is not None else "—"
+                mx = f"{r.max:.1f}" if r.max is not None else "—"
+                jit = f"{r.jitter:.1f}" if r.jitter is not None else "—"
+                p95 = f"{r.p95:.1f}" if r.p95 is not None else "—"
+                loss = f"{r.packet_loss:.0f}%"
+                status = r.status or "OK"
+            else:
+                score = "0.0"
+                grade = "Failed"
+                avg = mn = mx = jit = p95 = "—"
+                loss = "100%"
+                status = r.status or "Failed"
+
+            gc = Renderer.grade_color(grade)
+            sc = Renderer.status_color(status)
+            target_trunc = Renderer.truncate(r.target, 28)
+
+            row_cells = [
+                Renderer.pad(f"{Color.DIM}{rank}{Color.RESET}", 3, 'right'),
+                Renderer.pad(target_trunc, 28, 'left'),
+                Renderer.pad(f"{Color.DIM}{r.method}{Color.RESET}", 9, 'left'),
+                Renderer.pad(f"{Color.BOLD}{score}{Color.RESET}", 5, 'right'),
+                Renderer.pad(f"{gc}{grade}{Color.RESET}", 10, 'left'),
+                Renderer.pad(avg, 8, 'right'),
+                Renderer.pad(mn, 7, 'right'),
+                Renderer.pad(mx, 7, 'right'),
+                Renderer.pad(jit, 7, 'right'),
+                Renderer.pad(p95, 7, 'right'),
+                Renderer.pad(loss, 6, 'right'),
+                Renderer.pad(f"{sc}{status}{Color.RESET}", 20, 'left'),
+            ]
+            print(f"{Color.BLUE}│{Color.RESET} " + '  '.join(row_cells) + f" {Color.BLUE}│{Color.RESET}")
+
+        print(f"{Color.BOLD}{Color.BLUE}╰{'─' * total_w}╯{Color.RESET}")
+        print(f"  {Color.DIM}Rank is by custom diagnostic Score (higher = better).{Color.RESET}")
+
+    @staticmethod
+    def print_latency_chart(results: List[PingResult]):
+        ok = [r for r in results if r.test_success and r.avg is not None]
+        if len(ok) < 2:
+            return
+
+        ok_sorted = sorted(ok, key=lambda x: x.avg)
+        max_avg = max(r.avg for r in ok_sorted)
+
+        print()
+        print(f"{Color.BOLD}{Color.CYAN}  Average Latency{Color.RESET} "
+              f"{Color.DIM}(sorted, ms){Color.RESET}")
+        print(f"{Color.GRAY}  {'─' * 66}{Color.RESET}")
+
+        name_w = min(28, max(len(r.target) for r in ok_sorted))
+        for r in ok_sorted:
+            name = Renderer.truncate(r.target, name_w).ljust(name_w)
+            bar = Renderer.latency_bar(r.avg, max_avg, 24)
+            value = f"{r.avg:>7.1f} ms"
+            print(f"  {name}  {bar}  {value}")
+
+    @staticmethod
+    def print_summary(results: List[PingResult], elapsed: float):
+        total = len(results)
+        net_ok = [r for r in results if r.reachable]
+        test_ok = [r for r in results if r.test_success]
+        failed = [r for r in results if not r.test_success]
+
+        print()
+        print(f"{Color.BOLD}{Color.CYAN}  ╭────────────────────── SUMMARY ──────────────────────╮{Color.RESET}")
+
+        def row(label: str, value: str, value_color: str = Color.RESET):
+            label_pad = Renderer.pad(label, 22, 'left')
+            print(f"  {Color.CYAN}│{Color.RESET} {label_pad} {value_color}{value}{Color.RESET}")
+
+        row("Total targets", str(total))
+        row("Network reachable", f"{len(net_ok)}/{total}",
+            Color.GREEN if len(net_ok) == total else Color.YELLOW)
+        row("Test successful", f"{len(test_ok)}/{total}",
+            Color.GREEN if len(test_ok) == total else Color.YELLOW)
+        row("Failed", str(len(failed)),
+            Color.RED if failed else Color.GREEN)
+        row("Total time", f"{elapsed:.2f}s")
+
+        if test_ok:
+            lowest = min(test_ok, key=lambda r: r.avg if r.avg is not None else 1e9)
+            highest = max(test_ok, key=lambda r: r.avg if r.avg is not None else 0)
+            best = max(test_ok, key=lambda r: r.score if r.score is not None else 0)
+
+            print(f"  {Color.CYAN}├──────────────────────────────────────────────────────┤{Color.RESET}")
+            row("Lowest latency", f"{lowest.target}  ({lowest.avg:.1f} ms)", Color.GREEN)
+            row("Highest latency", f"{highest.target}  ({highest.avg:.1f} ms)", Color.YELLOW)
+            row("Highest score",
+                f"{best.target}  ({best.score:.1f} — {best.grade})",
+                Color.CYAN)
+
+        # HTTP status distribution across successful tests
+        mixed = [r for r in test_ok
+                 if r.http_status_distribution and len(r.http_status_distribution) > 1]
+        if mixed:
+            print(f"  {Color.CYAN}├──────────────────────────────────────────────────────┤{Color.RESET}")
+            print(f"  {Color.CYAN}│{Color.RESET} {Color.MAGENTA}Mixed HTTP statuses:{Color.RESET}")
+            for r in mixed[:8]:
+                parts = ', '.join(
+                    f"{code}×{cnt}"
+                    for code, cnt in sorted(r.http_status_distribution.items())
+                )
+                line = f"    • {Renderer.truncate(r.target, 24):<24} {parts}"
+                print(f"  {Color.CYAN}│{Color.RESET} {line}")
+
+        if failed:
+            print(f"  {Color.CYAN}├──────────────────────────────────────────────────────┤{Color.RESET}")
+            print(f"  {Color.CYAN}│{Color.RESET} {Color.RED}Failures:{Color.RESET}")
+            for r in failed[:8]:
+                err = r.error or 'no details'
+                line = (
+                    f"    • {Renderer.truncate(r.target, 24):<24} "
+                    f"[{r.status}]  {Color.DIM}{Renderer.truncate(err, 28)}{Color.RESET}"
+                )
+                print(f"  {Color.CYAN}│{Color.RESET} {line}")
+            if len(failed) > 8:
+                print(f"  {Color.CYAN}│{Color.RESET}     ... and {len(failed) - 8} more")
+
+        print(f"  {Color.BOLD}{Color.CYAN}╰──────────────────────────────────────────────────────╯{Color.RESET}")
+        print(f"  {Color.DIM}Note: \"Score\" is a custom heuristic for comparing results "
+              f"within this tool, not a standard network benchmark.{Color.RESET}")
+        print(f"  {Color.DIM}Note: DNS resolution is measured separately from the "
+              f"connection; for HTTP, curl resolves DNS internally.{Color.RESET}")
+
+
+# ============================================================
+# RUNNER
+# ============================================================
+
+class PingRunner:
+
+    def __init__(self, args):
+        self.args = args
         self.stop_event = threading.Event()
         self.results: List[PingResult] = []
-        self.log_lines = []
-        self.log_queue = Queue()
-        self.max_log_lines = 3000
-        self.current_test_thread = None
-        
-        self.setup_ui()
-        self.root.after(200, self.process_log_queue)
-        
-        self.log_info("=" * 50)
-        self.log_info(f"Network Ping Pro v{self.VERSION} Started")
-        self.log_info(f"System: {platform.system()} {platform.release()}")
-        self.log_info("=" * 50)
-    
-    def setup_ui(self):
-        main_frame = tk.Frame(self.root, bg='white')
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Header
-        header_frame = tk.Frame(main_frame, bg='white')
-        header_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(
-            header_frame,
-            text="Network Ping Pro",
-            font=('Segoe UI', 20, 'bold'),
-            fg='black',
-            bg='white'
-        ).pack(side=tk.LEFT)
-        
-        btn_frame = tk.Frame(header_frame, bg='white')
-        btn_frame.pack(side=tk.RIGHT)
-        
-        for text, cmd, color in [
-            ("Help", self.show_help, '#2ecc71'),
-            ("About", self.show_about, '#3498db')
-        ]:
-            btn = tk.Button(
-                btn_frame,
-                text=text,
-                command=cmd,
-                font=('Segoe UI', 10, 'bold'),
-                bg=color,
-                fg='white',
-                relief=tk.FLAT,
-                cursor='hand2',
-                padx=15,
-                pady=5
-            )
-            btn.pack(side=tk.RIGHT, padx=(0, 5))
-        
-        # Input Panel
-        self._setup_input_panel(main_frame)
-        self._setup_results_table(main_frame)
-        self._setup_footer(main_frame)
-    
-    def _setup_input_panel(self, parent):
-        top_panels = tk.Frame(parent, bg='white')
-        top_panels.pack(fill=tk.BOTH, expand=True)
-        
-        left_panel = tk.Frame(top_panels, bg='white')
-        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        
-        input_card = tk.Frame(left_panel, bg='#f8f8f8', relief=tk.FLAT, bd=1, highlightthickness=1, highlightcolor='#dddddd')
-        input_card.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        
-        input_inner = tk.Frame(input_card, bg='#f8f8f8')
-        input_inner.pack(padx=12, pady=10, fill=tk.BOTH, expand=True)
-        
-        # Targets
-        label_frame = tk.Frame(input_inner, bg='#f8f8f8')
-        label_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        tk.Label(label_frame, text="Targets (one per line or comma separated)", font=('Segoe UI', 10, 'bold'), fg='black', bg='#f8f8f8').pack(side=tk.LEFT)
-        
-        paste_btn = tk.Button(label_frame, text="Paste", command=self.paste_from_clipboard, font=('Segoe UI', 9, 'bold'), bg='#3498db', fg='white', relief=tk.FLAT, cursor='hand2', padx=12, pady=2)
-        paste_btn.pack(side=tk.RIGHT)
-        
-        self.sites_text = scrolledtext.ScrolledText(input_inner, height=4, font=('Consolas', 10), bg='white', fg='black', relief=tk.FLAT, bd=1, highlightthickness=1, highlightcolor='#cccccc')
-        self.sites_text.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-        self.sites_text.bind('<Control-a>', self.select_all)
-        self.sites_text.bind('<Control-v>', self.paste_text)
-        self.sites_text.bind('<Button-3>', self.right_click_menu)
-        
-        # Settings Row 1
-        settings_frame1 = tk.Frame(input_inner, bg='#f8f8f8')
-        settings_frame1.pack(fill=tk.X, pady=(0, 5))
-        
-        tk.Label(settings_frame1, text="Method:", font=('Segoe UI', 9), fg='black', bg='#f8f8f8').pack(side=tk.LEFT, padx=(0, 5))
-        self.method_var = tk.StringVar(value='ICMP')
-        method_combo = ttk.Combobox(settings_frame1, textvariable=self.method_var, values=['ICMP', 'TCP', 'HTTP'], state='readonly', width=10, font=('Segoe UI', 9))
-        method_combo.pack(side=tk.LEFT, padx=(0, 15))
-        
-        tk.Label(settings_frame1, text="Pings:", font=('Segoe UI', 9), fg='black', bg='#f8f8f8').pack(side=tk.LEFT, padx=(0, 5))
-        self.count_var = tk.StringVar(value='10')
-        count_spin = tk.Spinbox(settings_frame1, from_=1, to=50, textvariable=self.count_var, width=5, font=('Segoe UI', 9), bg='white', fg='black', relief=tk.FLAT, bd=1)
-        count_spin.pack(side=tk.LEFT, padx=(0, 15))
-        
-        tk.Label(settings_frame1, text="Timeout (s):", font=('Segoe UI', 9), fg='black', bg='#f8f8f8').pack(side=tk.LEFT, padx=(0, 5))
-        self.timeout_var = tk.StringVar(value='3')
-        timeout_spin = tk.Spinbox(settings_frame1, from_=1, to=10, textvariable=self.timeout_var, width=4, font=('Segoe UI', 9), bg='white', fg='black', relief=tk.FLAT, bd=1)
-        timeout_spin.pack(side=tk.LEFT, padx=(0, 15))
-        
-        tk.Label(settings_frame1, text="Workers:", font=('Segoe UI', 9), fg='black', bg='#f8f8f8').pack(side=tk.LEFT, padx=(0, 5))
-        self.concurrent_var = tk.StringVar(value='10')
-        concurrent_spin = tk.Spinbox(settings_frame1, from_=1, to=20, textvariable=self.concurrent_var, width=4, font=('Segoe UI', 9), bg='white', fg='black', relief=tk.FLAT, bd=1)
-        concurrent_spin.pack(side=tk.LEFT)
-        
-        # Settings Row 2 - Proxy
-        settings_frame2 = tk.Frame(input_inner, bg='#f8f8f8')
-        settings_frame2.pack(fill=tk.X, pady=(5, 0))
-        
-        self.proxy_var = tk.BooleanVar(value=False)
-        proxy_check = tk.Checkbutton(settings_frame2, text="Use Proxy", variable=self.proxy_var, 
-                                     command=self.toggle_proxy, font=('Segoe UI', 9), bg='#f8f8f8', fg='black')
-        proxy_check.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.proxy_type_var = tk.StringVar(value='socks5')
-        proxy_type_combo = ttk.Combobox(settings_frame2, textvariable=self.proxy_type_var, 
-                                        values=['http', 'https', 'socks5', 'socks4'], 
-                                        state='readonly', width=8, font=('Segoe UI', 9))
-        proxy_type_combo.pack(side=tk.LEFT, padx=(0, 5))
-        
-        tk.Label(settings_frame2, text="Host:", font=('Segoe UI', 9), fg='black', bg='#f8f8f8').pack(side=tk.LEFT, padx=(0, 5))
-        self.proxy_host_var = tk.StringVar(value='127.0.0.1')
-        proxy_host_entry = tk.Entry(settings_frame2, textvariable=self.proxy_host_var, width=15, font=('Segoe UI', 9), bg='white', fg='black', relief=tk.FLAT, bd=1)
-        proxy_host_entry.pack(side=tk.LEFT, padx=(0, 5))
-        
-        tk.Label(settings_frame2, text="Port:", font=('Segoe UI', 9), fg='black', bg='#f8f8f8').pack(side=tk.LEFT, padx=(0, 5))
-        self.proxy_port_var = tk.StringVar(value='10808')
-        proxy_port_entry = tk.Entry(settings_frame2, textvariable=self.proxy_port_var, width=6, font=('Segoe UI', 9), bg='white', fg='black', relief=tk.FLAT, bd=1)
-        proxy_port_entry.pack(side=tk.LEFT, padx=(0, 5))
-        
-        preset_btn = tk.Button(settings_frame2, text="v2ray/Hiddify (127.0.0.1:10808)", 
-                               command=self.set_v2ray_preset, font=('Segoe UI', 8), 
-                               bg='#e8f0fe', fg='#1a73e8', relief=tk.FLAT, cursor='hand2', padx=10, pady=2)
-        preset_btn.pack(side=tk.LEFT, padx=(10, 0))
-        
-        self._set_proxy_fields_state('disabled')
-        
-        # Settings Row 3 - Controls
-        settings_frame3 = tk.Frame(input_inner, bg='#f8f8f8')
-        settings_frame3.pack(fill=tk.X, pady=(5, 0))
-        
-        self.start_btn = tk.Button(settings_frame3, text="Start Test", command=self.start_test, 
-                                   font=('Segoe UI', 10, 'bold'), bg='black', fg='white', 
-                                   relief=tk.FLAT, cursor='hand2', padx=25, pady=6)
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.stop_btn = tk.Button(settings_frame3, text="Stop", command=self.stop_test, 
-                                  font=('Segoe UI', 10, 'bold'), bg='#e74c3c', fg='white', 
-                                  relief=tk.FLAT, cursor='hand2', padx=25, pady=6, state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.clear_btn = tk.Button(settings_frame3, text="Clear", command=self.clear_all, 
-                                   font=('Segoe UI', 10, 'bold'), bg='#95a5a6', fg='white', 
-                                   relief=tk.FLAT, cursor='hand2', padx=20, pady=6)
-        self.clear_btn.pack(side=tk.LEFT, padx=(0, 15))
-        
-        self.progress_label = tk.Label(settings_frame3, text="Ready", font=('Segoe UI', 9, 'bold'), fg='#2ecc71', bg='#f8f8f8')
-        self.progress_label.pack(side=tk.LEFT, padx=(10, 0))
-        
-        self.progress_bar = ttk.Progressbar(settings_frame3, mode='determinate', length=120)
-        self.progress_bar.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Log Panel
-        right_panel = tk.Frame(top_panels, bg='white', width=320)
-        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
-        
-        log_card = tk.Frame(right_panel, bg='#f8f8f8', relief=tk.FLAT, bd=1, highlightthickness=1, highlightcolor='#dddddd')
-        log_card.pack(fill=tk.BOTH, expand=True)
-        
-        log_inner = tk.Frame(log_card, bg='#f8f8f8')
-        log_inner.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-        
-        log_header = tk.Frame(log_inner, bg='#f8f8f8')
-        log_header.pack(fill=tk.X, pady=(0, 5))
-        
-        tk.Label(log_header, text="Log", font=('Segoe UI', 10, 'bold'), fg='black', bg='#f8f8f8').pack(side=tk.LEFT)
-        
-        clear_log_btn = tk.Button(log_header, text="Clear", command=self.clear_log, font=('Segoe UI', 8), bg='#95a5a6', fg='white', relief=tk.FLAT, cursor='hand2', padx=10)
-        clear_log_btn.pack(side=tk.RIGHT, padx=(0, 5))
-        
-        save_log_btn = tk.Button(log_header, text="Save", command=self.save_log, font=('Segoe UI', 8), bg='#3498db', fg='white', relief=tk.FLAT, cursor='hand2', padx=10)
-        save_log_btn.pack(side=tk.RIGHT, padx=(0, 5))
-        
-        self.log_text = scrolledtext.ScrolledText(log_inner, height=15, font=('Consolas', 8), bg='#1e1e1e', fg='#d4d4d4', relief=tk.FLAT, bd=1, highlightthickness=1, highlightcolor='#cccccc')
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        self.log_text.bind('<Control-c>', self.copy_from_log)
-        self.log_text.bind('<Button-3>', self.log_right_click)
-        
-        self.log_text.tag_configure('info', foreground='#4fc3f7')
-        self.log_text.tag_configure('success', foreground='#81c784')
-        self.log_text.tag_configure('error', foreground='#e57373')
-        self.log_text.tag_configure('warning', foreground='#ffb74d')
-    
-    def _setup_results_table(self, parent):
-        table_frame = tk.Frame(parent, bg='white')
-        table_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        
-        scroll_y = ttk.Scrollbar(table_frame, orient=tk.VERTICAL)
-        scroll_x = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
-        
-        columns = ('rank', 'site', 'method', 'score', 'grade', 'avg', 'min', 'max', 'jitter', 'p50', 'p95', 'p99', 'loss', 'status')
-        
-        self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=10, 
-                                 yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        
-        col_config = {
-            'rank': {'text': '#', 'width': 35},
-            'site': {'text': 'Target', 'width': 140},
-            'method': {'text': 'Method', 'width': 65},
-            'score': {'text': 'Score', 'width': 55},
-            'grade': {'text': 'Grade', 'width': 75},
-            'avg': {'text': 'Avg', 'width': 65},
-            'min': {'text': 'Min', 'width': 65},
-            'max': {'text': 'Max', 'width': 65},
-            'jitter': {'text': 'Jitter', 'width': 60},
-            'p50': {'text': 'P50', 'width': 55},
-            'p95': {'text': 'P95', 'width': 55},
-            'p99': {'text': 'P99', 'width': 55},
-            'loss': {'text': 'Loss %', 'width': 60},
-            'status': {'text': 'Status', 'width': 75}
-        }
-        
-        for col, config in col_config.items():
-            self.tree.heading(col, text=config['text'], anchor='center')
-            self.tree.column(col, width=config['width'], anchor='center', minwidth=35)
-        
-        scroll_y.config(command=self.tree.yview)
-        scroll_x.config(command=self.tree.xview)
-        scroll_y.grid(row=0, column=1, sticky='ns')
-        scroll_x.grid(row=1, column=0, sticky='ew')
-        self.tree.grid(row=0, column=0, sticky='nsew')
-        
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
-        
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure('Treeview', background='white', foreground='black', rowheight=26, 
-                       fieldbackground='white', font=('Segoe UI', 8))
-        style.configure('Treeview.Heading', background='#f0f0f0', foreground='black', font=('Segoe UI', 8, 'bold'))
-        
-        self.tree.tag_configure('excellent', background='#d4edda')
-        self.tree.tag_configure('verygood', background='#d1ecf1')
-        self.tree.tag_configure('good', background='#fff3cd')
-        self.tree.tag_configure('fair', background='#ffe5d0')
-        self.tree.tag_configure('poor', background='#f8d7da')
-        self.tree.tag_configure('failed', background='#f5c6cb')
-    
-    def _setup_footer(self, parent):
-        footer_frame = tk.Frame(parent, bg='white')
-        footer_frame.pack(fill=tk.X, pady=(6, 0))
-        
-        self.stats_label = tk.Label(footer_frame, text="Ready to test", font=('Segoe UI', 9), fg='#666666', bg='white')
-        self.stats_label.pack(side=tk.LEFT)
-        
-        export_csv_btn = tk.Button(footer_frame, text="CSV", command=self.export_csv, font=('Segoe UI', 8), bg='white', fg='#666666', relief=tk.FLAT, cursor='hand2')
-        export_csv_btn.pack(side=tk.RIGHT, padx=(0, 5))
-        
-        export_json_btn = tk.Button(footer_frame, text="JSON", command=self.export_json, font=('Segoe UI', 8), bg='white', fg='#666666', relief=tk.FLAT, cursor='hand2')
-        export_json_btn.pack(side=tk.RIGHT, padx=(0, 5))
-    
-    def _set_proxy_fields_state(self, state):
-        for child in self.sites_text.master.master.winfo_children():
-            if isinstance(child, tk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, (tk.Entry, ttk.Combobox)):
-                        subchild.config(state=state)
-    
-    def toggle_proxy(self):
-        if self.proxy_var.get():
-            self._set_proxy_fields_state('normal')
-            self.log_info("✅ Proxy enabled")
-        else:
-            self._set_proxy_fields_state('disabled')
-            PingEngine.clear_proxy()
-            self.log_info("✅ Proxy disabled")
-    
-    def set_v2ray_preset(self):
-        self.proxy_var.set(True)
-        self.proxy_type_var.set('socks5')
-        self.proxy_host_var.set('127.0.0.1')
-        self.proxy_port_var.set('10808')
-        self._set_proxy_fields_state('normal')
-        self.log_info("✅ v2ray/Hiddify preset applied (SOCKS5 127.0.0.1:10808)")
-        messagebox.showinfo("Proxy Preset", 
-            "✅ v2ray/Hiddify SOCKS5 proxy preset applied!\n\n"
-            "Host: 127.0.0.1\n"
-            "Port: 10808\n"
-            "Type: SOCKS5\n\n"
-            "Now select TCP or HTTP method and start test.")
-    
-    # ============================================================
-    # Copy/Paste Functions
-    # ============================================================
-    
-    def select_all(self, event=None):
-        self.sites_text.tag_add('sel', '1.0', 'end')
-        return 'break'
-    
-    def paste_from_clipboard(self):
-        try:
-            text = self.root.clipboard_get()
-            if text:
-                self.sites_text.delete('1.0', tk.END)
-                self.sites_text.insert('1.0', text)
-                self.log_info("📋 Pasted from clipboard")
-        except:
-            messagebox.showinfo('Info', 'Nothing to paste or clipboard is empty')
-    
-    def paste_text(self, event=None):
-        try:
-            text = self.root.clipboard_get()
-            if text:
-                cursor_pos = self.sites_text.index(tk.INSERT)
-                self.sites_text.insert(cursor_pos, text)
-                return "break"
-        except:
-            pass
-    
-    def copy_from_log(self, event=None):
-        try:
-            selected = self.log_text.get(tk.SEL_FIRST, tk.SEL_LAST)
-            self.root.clipboard_clear()
-            self.root.clipboard_append(selected)
-            return "break"
-        except:
-            pass
-    
-    def right_click_menu(self, event):
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="📋 Paste", command=self.paste_from_clipboard)
-        menu.add_command(label="📝 Select All", command=self.select_all)
-        menu.add_separator()
-        menu.add_command(label="🗑️ Clear", command=lambda: self.sites_text.delete('1.0', tk.END))
-        menu.post(event.x_root, event.y_root)
-    
-    def log_right_click(self, event):
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="📋 Copy", command=lambda: self.copy_from_log())
-        menu.add_command(label="📝 Select All", command=lambda: self.log_text.tag_add('sel', '1.0', 'end'))
-        menu.add_separator()
-        menu.add_command(label="🗑️ Clear", command=self.clear_log)
-        menu.post(event.x_root, event.y_root)
-    
-    # ============================================================
-    # Logging
-    # ============================================================
-    
-    def log(self, message, tag='info'):
-        self.log_queue.put((tag, message))
-    
-    def process_log_queue(self):
-        count = 0
-        while not self.log_queue.empty() and count < 20:
-            tag, message = self.log_queue.get()
-            self._append_log(message, tag)
-            count += 1
-        self.root.after(200, self.process_log_queue)
-    
-    def _append_log(self, message, tag):
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        entry = f"[{timestamp}] {message}\n"
-        
-        if len(self.log_lines) >= self.max_log_lines:
-            self.log_text.delete('1.0', '2.0')
-            self.log_lines.pop(0)
-        
-        self.log_text.insert(tk.END, entry, tag)
-        self.log_text.see(tk.END)
-        self.log_lines.append(entry)
-    
-    def log_info(self, msg): self.log(msg, 'info')
-    def log_success(self, msg): self.log(f"✅ {msg}", 'success')
-    def log_error(self, msg): self.log(f"❌ {msg}", 'error')
-    def log_warning(self, msg): self.log(f"⚠️ {msg}", 'warning')
-    
-    def clear_log(self):
-        self.log_text.delete('1.0', tk.END)
-        self.log_lines = []
-    
-    # ============================================================
-    # About & Help
-    # ============================================================
-    
-    def show_about(self):
-        about_window = tk.Toplevel(self.root)
-        about_window.title("About Network Ping Pro")
-        about_window.geometry("480x520")
-        about_window.resizable(False, False)
-        about_window.configure(bg='white')
-        about_window.transient(self.root)
-        about_window.grab_set()
-        
-        about_frame = tk.Frame(about_window, bg='white')
-        about_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=25)
-        
-        tk.Label(about_frame, text="Network Ping Pro", font=('Segoe UI', 22, 'bold'), fg='black', bg='white').pack(pady=(0, 5))
-        tk.Label(about_frame, text=f"Version {self.VERSION}", font=('Segoe UI', 10), fg='#666666', bg='white').pack(pady=(0, 15))
-        
-        tk.Label(about_frame, text="Developer:", font=('Segoe UI', 11, 'bold'), fg='black', bg='white').pack()
-        tk.Label(about_frame, text=self.AUTHOR, font=('Segoe UI', 11), fg='#3498db', bg='white').pack(pady=(0, 10))
-        
-        methods_frame = tk.Frame(about_frame, bg='#f8f8f8', relief=tk.FLAT, bd=1)
-        methods_frame.pack(fill=tk.X, pady=(0, 12))
-        
-        tk.Label(methods_frame, text="🔧 Testing Methods:", font=('Segoe UI', 10, 'bold'), fg='black', bg='#f8f8f8').pack(anchor='w', padx=10, pady=(5, 2))
-        tk.Label(methods_frame, text="ICMP - Standard ping (no proxy)", font=('Segoe UI', 9), fg='#333', bg='#f8f8f8').pack(anchor='w', padx=15)
-        tk.Label(methods_frame, text="TCP - Real TCP connection (socket)", font=('Segoe UI', 9), fg='#333', bg='#f8f8f8').pack(anchor='w', padx=15)
-        tk.Label(methods_frame, text="HTTP - Real HTTP/HTTPS (curl)", font=('Segoe UI', 9), fg='#333', bg='#f8f8f8').pack(anchor='w', padx=15, pady=(0, 5))
-        
-        tk.Label(about_frame, text="🌐 Connect with me:", font=('Segoe UI', 11, 'bold'), fg='black', bg='white').pack(pady=(5, 8))
-        
-        links_frame = tk.Frame(about_frame, bg='white')
-        links_frame.pack(pady=(0, 12))
-        
-        link_style = {'font': ('Segoe UI', 9), 'fg': '#3498db', 'bg': 'white', 'cursor': 'hand2', 'relief': tk.FLAT, 'pady': 3}
-        
-        for text, url in [
-            ("🐦 X (Twitter)", "https://x.com/Erffanhub_00"),
-            ("🐙 GitHub", "https://github.com/erffanhub-00"),
-            ("📄 Gist", "https://gist.github.com/erffanhub-00")
-        ]:
-            btn = tk.Button(links_frame, text=text, command=lambda u=url: webbrowser.open(u), **link_style)
-            btn.pack(fill=tk.X)
-        
-        close_btn = tk.Button(about_frame, text="Close", command=about_window.destroy, 
-                             font=('Segoe UI', 10, 'bold'), bg='black', fg='white', 
-                             relief=tk.FLAT, cursor='hand2', padx=20, pady=5)
-        close_btn.pack(pady=(5, 0))
-    
-    def show_help(self):
-        help_window = tk.Toplevel(self.root)
-        help_window.title("Help - Network Ping Pro")
-        help_window.geometry("550x640")
-        help_window.resizable(False, False)
-        help_window.configure(bg='white')
-        help_window.transient(self.root)
-        help_window.grab_set()
-        
-        help_frame = tk.Frame(help_window, bg='white')
-        help_frame.pack(fill=tk.BOTH, expand=True, padx=25, pady=20)
-        
-        tk.Label(help_frame, text="📖 Help & Guide", font=('Segoe UI', 20, 'bold'), fg='black', bg='white').pack(pady=(0, 15))
-        
-        help_text = scrolledtext.ScrolledText(help_frame, height=22, font=('Segoe UI', 10), bg='#f8f9fa', fg='black', relief=tk.FLAT, bd=1)
-        help_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        help_content = """
-📌 HOW TO USE:
 
-1. Enter targets (one per line or comma separated)
-   Examples:
-   • google.com (ICMP)
-   • google.com:443 (TCP)
-   • https://google.com/test (HTTP)
-   • [::1]:8080 (IPv6)
+    def _log(self, msg: str, color: str = Color.RESET):
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"{Color.GRAY}[{ts}]{Color.RESET} {color}{msg}{Color.RESET}")
 
-2. Select Testing Method:
-   • ICMP - Standard ping (fastest, no proxy)
-   • TCP - Real TCP connection test (supports proxy)
-   • HTTP - Real HTTP/HTTPS request (supports proxy)
-
-3. Adjust Settings:
-   • Pings: Number of tests (1-50)
-   • Timeout: Max wait time per test (1-10s)
-   • Workers: Concurrent tests (1-20)
-
-4. Proxy Setup (for TCP/HTTP):
-   • Enable "Use Proxy"
-   • Choose type (http/https/socks5/socks4)
-   • Enter host and port
-   • Click preset button for v2ray/Hiddify
-
-5. Click "Start Test" to begin
-
-📊 RESULTS EXPLANATION:
-
-• Score: Overall quality (0-100)
-• Grade: Excellent / Very Good / Good / Fair / Poor
-• Avg: Average response time
-• Min/Max: Fastest/slowest response
-• Jitter: Variation between responses
-• P50/P95/P99: Percentile values
-• Loss: Percentage of lost packets
-• Status: OK / Failed / Timeout / Refused
-
-⌨️ SHORTCUTS:
-
-• Ctrl+A: Select all targets
-• Ctrl+V: Paste from clipboard
-• Ctrl+C: Copy from log (when selected)
-• Right-click: Context menu
-
-🔧 REQUIREMENTS:
-
-• ICMP: None (built-in ping)
-• TCP: None (built-in socket)
-• HTTP: curl installed (https://curl.se/windows/)
-
-💡 TIPS:
-
-• For VPN/Proxy users, use TCP or HTTP method
-• Higher Pings = more accurate results
-• More Workers = faster testing
-• Use preset button for v2ray/Hiddify (SOCKS5:10808)
-• For accurate TCP tests, specify port (e.g., google.com:443)
-"""
-        help_text.insert('1.0', help_content)
-        help_text.config(state=tk.DISABLED)
-        
-        close_btn = tk.Button(help_frame, text="Close", command=help_window.destroy, 
-                             font=('Segoe UI', 10, 'bold'), bg='black', fg='white', 
-                             relief=tk.FLAT, cursor='hand2', padx=25, pady=5)
-        close_btn.pack()
-    
-    # ============================================================
-    # Main Test Functions
-    # ============================================================
-    
-    def start_test(self):
-        if self.running:
-            return
-        
-        sites_text = self.sites_text.get('1.0', tk.END).strip()
-        if not sites_text:
-            messagebox.showerror('Error', 'Please enter at least one target')
-            return
-        
-        targets = TargetParser.parse_sites(sites_text)
+    def run(self) -> int:
+        started = time.time()
+        targets = TargetParser.parse_sites(self.args.targets)
         if not targets:
-            messagebox.showerror('Error', 'No valid targets found')
-            return
-        
-        try:
-            count = max(1, min(50, int(self.count_var.get())))
-        except:
-            count = 10
-        
-        try:
-            timeout = max(1, min(10, float(self.timeout_var.get())))
-        except:
-            timeout = 3
-        
-        try:
-            workers = max(1, min(20, int(self.concurrent_var.get())))
-        except:
-            workers = 10
-        
-        method = self.method_var.get()
-        
-        if self.proxy_var.get():
-            proxy_type = self.proxy_type_var.get()
-            proxy_host = self.proxy_host_var.get().strip()
-            proxy_port = self.proxy_port_var.get().strip()
-            
-            if proxy_host and proxy_port:
-                try:
-                    port = int(proxy_port)
-                    PingEngine.set_proxy(proxy_type, proxy_host, port)
-                    self.log_info(f"✅ Proxy set: {proxy_type}://{proxy_host}:{proxy_port}")
-                except ValueError:
-                    messagebox.showerror('Error', 'Invalid proxy port')
-                    return
-        else:
-            PingEngine.clear_proxy()
-        
-        self.log_info("=" * 40)
-        self.log_info(f"🚀 Starting: {len(targets)} targets, {count} pings, Method: {method}")
-        if PingEngine.PROXY_TYPE:
-            self.log_info(f"🔒 Using proxy: {PingEngine.PROXY_TYPE}://{PingEngine.PROXY_HOST}:{PingEngine.PROXY_PORT}")
-        self.log_info("=" * 40)
-        
-        self.running = True
-        self.stop_event.clear()
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.clear_btn.config(state=tk.DISABLED)
-        self.progress_bar['value'] = 0
-        self.progress_label.config(text="Starting...", fg='#f39c12')
-        
-        self.clear_results()
-        
-        self.current_test_thread = threading.Thread(
-            target=self._run_test,
-            args=(targets, count, timeout, method, workers)
+            self._log("No valid targets found.", Color.RED)
+            return 2
+
+        if self.args.proxy:
+            try:
+                parsed = urlparse(self.args.proxy)
+                if parsed.scheme not in ('http', 'https', 'socks4', 'socks5'):
+                    raise ValueError(f"unsupported scheme: {parsed.scheme}")
+                if not parsed.hostname or not parsed.port:
+                    raise ValueError("host or port missing")
+                PingEngine.set_proxy(self.args.proxy,
+                                     self.args.proxy_user, self.args.proxy_pass)
+                self._log(f"Proxy enabled (HTTP method only): {self.args.proxy}",
+                          Color.CYAN)
+            except Exception as e:
+                self._log(f"Invalid proxy: {e}", Color.RED)
+                return 2
+
+        self._log(
+            f"Starting: {len(targets)} targets • "
+            f"{self.args.count} pings • "
+            f"method={self.args.method} • "
+            f"timeout={self.args.timeout}s • "
+            f"workers={self.args.workers}",
+            Color.BOLD,
         )
-        self.current_test_thread.daemon = True
-        self.current_test_thread.start()
-    
-    def stop_test(self):
-        self.stop_event.set()
-        self.log_warning("⏹ Stop requested")
-        self.progress_label.config(text="Stopping...", fg='#e74c3c')
-        self.stop_btn.config(state=tk.DISABLED)
-    
-    def _run_test(self, targets, count, timeout, method, workers):
-        try:
-            results = self._ping_all(targets, count, timeout, method, workers)
-            self.root.after(0, self._display_results, results, len(targets))
-        except Exception as e:
-            self.log_error(f"❌ Error: {str(e)}")
-            self.root.after(0, self._show_error, str(e))
-    
-    def _ping_all(self, targets, count, timeout, method, workers):
-        results = []
+
+        if not self.args.no_progress and not self.args.quiet:
+            print()
+
+        results = self._ping_all(targets)
+        results = self._rank(results)
+        self.results = results
+
+        elapsed = time.time() - started
+
+        if not self.args.quiet:
+            Renderer.clear_line()
+            Renderer.print_results_table(results)
+            Renderer.print_latency_chart(results)
+            Renderer.print_summary(results, elapsed)
+        else:
+            # Quiet: one line per target. Machine-friendly.
+            for r in results:
+                if r.test_success:
+                    print(f"OK    {r.target:<40} "
+                          f"score={r.score:>5.1f} avg={r.avg:>7.1f}ms "
+                          f"loss={r.packet_loss:>4.0f}% {r.status}")
+                else:
+                    print(f"FAIL  {r.target:<40} {r.status}  {r.error or ''}")
+
+        if self.args.output_csv:
+            self._export_csv(self.args.output_csv)
+        if self.args.output_json:
+            self._export_json(self.args.output_json)
+
+        if all(r.test_success for r in results):
+            return 0
+        return 1
+
+    def _ping_all(self, targets) -> List[PingResult]:
+        results: List[PingResult] = []
         total = len(targets)
         completed = 0
-        
-        def ping_target(target):
-            host = target['host']
-            if self.stop_event.is_set():
-                return PingResult(target=host, success=False, method='Cancelled', status='Cancelled')
-            
-            return PingEngine.ping_host(target, method, count, timeout, self.stop_event)
-        
-        with ThreadPoolExecutor(max_workers=min(workers, total)) as executor:
-            futures = {executor.submit(ping_target, target): target for target in targets}
-            
-            for future in as_completed(futures):
-                if self.stop_event.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                
-                target = futures[future]
-                try:
-                    result = future.result(timeout=timeout+5)
-                    result.target = target['host']
-                    results.append(result)
-                except Exception as e:
-                    self.log_error(f"❌ {target['host']}: Error - {str(e)}")
-                    results.append(PingResult(target=target['host'], success=False, method='Error', error=str(e)[:50], status='Error'))
-                
-                completed += 1
-                progress = (completed / total) * 100
-                self.root.after(0, self._update_progress, progress, completed, total)
-        
+        lock = threading.Lock()
+
+        def ping_one(target):
+            return PingEngine.ping_host(
+                target, self.args.method, self.args.count,
+                self.args.timeout, self.stop_event,
+            )
+
+        try:
+            with ThreadPoolExecutor(max_workers=min(self.args.workers, total)) as ex:
+                futures = {ex.submit(ping_one, t): t for t in targets}
+                for fut in as_completed(futures):
+                    if self.stop_event.is_set():
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        break
+
+                    target = futures[fut]
+                    try:
+                        r = fut.result()
+                        r.target = target['host']
+                    except Exception as e:
+                        r = PingResult(
+                            target=target['host'], method=self.args.method,
+                            status='Error', error=str(e)[:80],
+                        )
+
+                    with lock:
+                        results.append(r)
+                        completed += 1
+                        if not self.args.no_progress and not self.args.quiet:
+                            Renderer.progress(
+                                completed, total, target['host'], r.status,
+                            )
+        except KeyboardInterrupt:
+            self._log("\nInterrupted by user. Stopping...", Color.YELLOW)
+            self.stop_event.set()
+
         return results
-    
-    def _update_progress(self, progress, completed, total):
-        self.progress_bar['value'] = progress
-        self.progress_label.config(text=f"{completed}/{total}")
-    
-    def _display_results(self, results, total):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        success_count = 0
-        failed_count = 0
-        
-        for r in results:
-            if r.success:
-                success_count += 1
-            else:
-                failed_count += 1
-        
-        # Sort by score (higher is better)
-        successful = [r for r in results if r.success]
-        successful_sorted = sorted(successful, key=lambda x: x.score if x.score else 0, reverse=True)
-        
-        for idx, r in enumerate(successful_sorted, 1):
-            r.rank = idx
-        
-        for r in results:
-            if not r.success:
-                r.rank = None
-        
-        final_results = successful_sorted + [r for r in results if not r.success]
-        self.results = final_results
-        
-        for r in final_results:
-            rank_display = str(r.rank) if r.rank else '—'
-            
-            if r.success:
-                score_val = f"{r.score:.1f}" if r.score is not None else '0'
-                grade_val = r.grade or 'Unknown'
-                avg_val = f"{r.avg:.1f}" if r.avg is not None else '—'
-                min_val = f"{r.min:.1f}" if r.min is not None else '—'
-                max_val = f"{r.max:.1f}" if r.max is not None else '—'
-                jitter_val = f"{r.jitter:.1f}" if r.jitter is not None else '—'
-                p50_val = f"{r.p50:.1f}" if r.p50 is not None else '—'
-                p95_val = f"{r.p95:.1f}" if r.p95 is not None else '—'
-                p99_val = f"{r.p99:.1f}" if r.p99 is not None else '—'
-                loss_val = f"{r.packet_loss:.1f}" if r.packet_loss is not None else '0'
-                status_display = r.status or 'OK'
-                method_display = r.method or 'Unknown'
-            else:
-                score_val = '0'
-                grade_val = 'Failed'
-                avg_val = '—'
-                min_val = '—'
-                max_val = '—'
-                jitter_val = '—'
-                p50_val = '—'
-                p95_val = '—'
-                p99_val = '—'
-                loss_val = '100.0'
-                status_display = r.status or 'Failed'
-                method_display = r.method or 'Failed'
-            
-            # Determine tag based on grade
-            if r.success and r.grade:
-                grade_lower = r.grade.lower()
-                if 'excellent' in grade_lower:
-                    tag = 'excellent'
-                elif 'very good' in grade_lower:
-                    tag = 'verygood'
-                elif 'good' in grade_lower:
-                    tag = 'good'
-                elif 'fair' in grade_lower:
-                    tag = 'fair'
-                else:
-                    tag = 'poor'
-            else:
-                tag = 'failed'
-            
-            self.tree.insert('', tk.END, values=(
-                rank_display, r.target, method_display, score_val, grade_val,
-                avg_val, min_val, max_val, jitter_val, p50_val, p95_val, p99_val,
-                loss_val, status_display
-            ), tags=(tag,))
-        
-        fastest = successful_sorted[0] if successful_sorted else None
-        best_score = successful_sorted[0] if successful_sorted else None
-        
-        fastest_name = fastest.target if fastest else '—'
-        fastest_avg = fastest.avg if fastest else 0
-        best_name = best_score.target if best_score else '—'
-        best_score_val = best_score.score if best_score else 0
-        
-        self.stats_label.config(
-            text=f"📊 Total: {len(results)} | ✅ Success: {success_count} | ❌ Failed: {failed_count} | 🏆 Fastest: {fastest_name} ({fastest_avg:.1f}ms) | ⭐ Best: {best_name} ({best_score_val:.1f})"
+
+    @staticmethod
+    def _rank(results: List[PingResult]) -> List[PingResult]:
+        successful = [r for r in results if r.test_success]
+        successful.sort(
+            key=lambda x: x.score if x.score is not None else 0,
+            reverse=True,
         )
-        
-        self.log_info("=" * 40)
-        self.log_info(f"✅ Done: {len(results)} targets, Success: {success_count}, Failed: {failed_count}")
-        self.log_info(f"🏆 Fastest: {fastest_name} ({fastest_avg:.1f}ms)")
-        self.log_info(f"⭐ Best: {best_name} ({best_score_val:.1f})")
-        self.log_info("=" * 40)
-        
-        self._reset_ui()
-    
-    def _reset_ui(self):
-        self.running = False
-        self.start_btn.config(state=tk.NORMAL, text='Start Test')
-        self.stop_btn.config(state=tk.DISABLED)
-        self.clear_btn.config(state=tk.NORMAL)
-        
-        if self.stop_event.is_set():
-            self.progress_label.config(text="⏹ Stopped", fg='#e74c3c')
-        else:
-            self.progress_label.config(text="✅ Done", fg='#2ecc71')
-        self.progress_bar['value'] = 100
-    
-    def _show_error(self, error):
-        messagebox.showerror('Error', f'❌ Error: {error}')
-        self.log_error(f"❌ Error: {error}")
-        self._reset_ui()
-        self.progress_label.config(text='❌ Error', fg='#e74c3c')
-    
-    def clear_results(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self.results = []
-        self.stats_label.config(text="🧹 Cleared")
-    
-    def clear_all(self):
-        self.clear_results()
-        self.progress_label.config(text="✅ Ready", fg='#2ecc71')
-        self.progress_bar['value'] = 0
-        self.log_info("🧹 Cleared")
-    
-    # ============================================================
-    # Export Functions
-    # ============================================================
-    
-    def export_csv(self):
-        if not self.results:
-            messagebox.showinfo('Info', 'No results to export')
-            return
-        
+        for i, r in enumerate(successful, 1):
+            r.rank = i
+
+        failed = [r for r in results if not r.test_success]
+        failed.sort(key=lambda x: (not x.reachable, x.target))
+        return successful + failed
+
+    def _export_csv(self, path: str):
         try:
-            from tkinter import filedialog
-            file_path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV files', '*.csv')])
-            if not file_path:
-                return
-            
-            with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Rank', 'Target', 'Method', 'Score', 'Grade', 'Avg', 'Min', 'Max', 'Jitter', 'P50', 'P95', 'P99', 'Loss %', 'Status'])
-                
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                w = csv.writer(f)
+                w.writerow([
+                    'Rank', 'Target', 'Method',
+                    'Reachable', 'TestSuccess', 'ApplicationOK',
+                    'Score', 'Grade',
+                    'Avg', 'Min', 'Max', 'Jitter',
+                    'P50', 'P95', 'P99',
+                    'Loss %', 'Status', 'Error',
+                    'Resolved IP', 'Family',
+                    'DNS avg', 'Connect avg', 'TTFB avg', 'Total avg',
+                    'HTTP status', 'HTTP distribution',
+                ])
                 for r in self.results:
-                    writer.writerow([
-                        r.rank or '—', r.target, r.method,
-                        r.score if r.success else '0',
-                        r.grade if r.success else 'Failed',
-                        r.avg if r.success else '—',
-                        r.min if r.success else '—',
-                        r.max if r.success else '—',
-                        r.jitter if r.success else '—',
-                        r.p50 if r.success else '—',
-                        r.p95 if r.success else '—',
-                        r.p99 if r.success else '—',
-                        r.packet_loss if r.success else '100.0',
-                        r.status
+                    dist_str = ''
+                    if r.http_status_distribution:
+                        dist_str = ';'.join(
+                            f"{code}:{cnt}"
+                            for code, cnt in sorted(r.http_status_distribution.items())
+                        )
+                    w.writerow([
+                        r.rank if r.rank else '',
+                        r.target, r.method,
+                        r.reachable, r.test_success,
+                        r.application_ok if r.application_ok is not None else '',
+                        r.score if r.score is not None else '',
+                        r.grade or '',
+                        r.avg, r.min, r.max, r.jitter,
+                        r.p50, r.p95, r.p99,
+                        r.packet_loss,
+                        r.status, r.error or '',
+                        r.resolved_ip or '', r.ip_family or '',
+                        r.dns.avg if r.dns.avg is not None else '',
+                        r.connect.avg if r.connect.avg is not None else '',
+                        r.ttfb.avg if r.ttfb.avg is not None else '',
+                        r.total.avg if r.total.avg is not None else '',
+                        r.http_status if r.http_status else '',
+                        dist_str,
                     ])
-            
-            self.log_success(f"📤 Exported to {file_path}")
-            messagebox.showinfo('Success', f'Exported to {file_path}')
+            self._log(f"CSV → {path}", Color.GREEN)
         except Exception as e:
-            self.log_error(f"Export failed: {e}")
-            messagebox.showerror('Error', f'Export failed: {e}')
-    
-    def export_json(self):
-        if not self.results:
-            messagebox.showinfo('Info', 'No results to export')
-            return
-        
+            self._log(f"CSV export failed: {e}", Color.RED)
+
+    def _export_json(self, path: str):
         try:
-            from tkinter import filedialog
-            file_path = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[('JSON files', '*.json')])
-            if not file_path:
-                return
-            
-            export_data = {
-                'version': self.VERSION,
+            data = {
+                'tool': 'Network Ping Pro',
+                'version': __version__,
                 'timestamp': datetime.now().isoformat(),
+                'method': self.args.method,
+                'count': self.args.count,
+                'timeout': self.args.timeout,
                 'total': len(self.results),
-                'results': [
-                    {
-                        'rank': r.rank,
-                        'target': r.target,
-                        'method': r.method,
-                        'score': r.score,
-                        'grade': r.grade,
-                        'avg': r.avg,
-                        'min': r.min,
-                        'max': r.max,
-                        'jitter': r.jitter,
-                        'p50': r.p50,
-                        'p95': r.p95,
-                        'p99': r.p99,
-                        'packet_loss': r.packet_loss,
-                        'status': r.status,
-                        'error': r.error,
-                        'dns_time': r.dns_time,
-                        'connect_time': r.connect_time,
-                        'http_status': r.http_status
-                    } for r in self.results
-                ]
+                'results': [asdict(r) for r in self.results],
             }
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(export_data, f, indent=2, ensure_ascii=False)
-            
-            self.log_success(f"📤 Exported to {file_path}")
-            messagebox.showinfo('Success', f'Exported to {file_path}')
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self._log(f"JSON → {path}", Color.GREEN)
         except Exception as e:
-            self.log_error(f"Export failed: {e}")
-            messagebox.showerror('Error', f'Export failed: {e}')
-    
-    def save_log(self):
-        if not self.log_lines:
-            messagebox.showinfo('Info', 'No log to save')
-            return
-        
+            self._log(f"JSON export failed: {e}", Color.RED)
+
+
+# ============================================================
+# ARGUMENT PARSER
+# ============================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog='network-ping-pro',
+        description=(
+            'Network Ping Pro — Network Diagnostic Tool (CLI)\n'
+            'Tests latency, jitter, and packet loss via ICMP, TCP, or HTTP.\n'
+            'For HTTP, curl must be installed.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic ICMP test
+  network-ping-pro google.com github.com
+
+  # TCP on port 443
+  network-ping-pro -m TCP google.com:443 github.com:443
+
+  # HTTP through a SOCKS5 proxy (e.g. v2ray / Hiddify)
+  network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 https://google.com
+
+  # More pings, custom timeout, export CSV + JSON
+  network-ping-pro -c 20 -t 5 -o out.csv --json out.json google.com
+
+  # Read targets from a file
+  network-ping-pro -f targets.txt
+
+  # Quiet mode (one-line-per-target output, script-friendly)
+  network-ping-pro -q google.com
+
+Notes:
+  • Proxy applies to HTTP method only. ICMP cannot traverse HTTP/SOCKS proxies.
+  • DNS resolution is measured separately from the connection. For HTTP, curl
+    resolves DNS internally, so DNS and HTTP timings are not part of the same
+    connection. For TCP, the connection is made to the IP resolved in the DNS
+    stage, so both belong to the same attempt.
+  • "Score" is a custom heuristic for comparing results within this tool,
+    not an industry-standard benchmark.
+        """,
+    )
+
+    p.add_argument('targets', nargs='*', default=[],
+                   help='Targets (host, host:port, URL, or [IPv6]:port)')
+    p.add_argument('-f', '--file', metavar='FILE',
+                   help='Read targets from a file (one per line, "#" for comments)')
+
+    p.add_argument('-m', '--method', choices=['ICMP', 'TCP', 'HTTP'],
+                   default='ICMP', help='Testing method (default: ICMP)')
+    p.add_argument('-c', '--count', type=int, default=10,
+                   help='Pings per target (1-200, default: 10)')
+    p.add_argument('-t', '--timeout', type=float, default=3.0,
+                   help='Timeout per ping in seconds (1-30, default: 3.0)')
+    p.add_argument('-w', '--workers', type=int, default=10,
+                   help='Concurrent workers (1-50, default: 10)')
+
+    p.add_argument('--proxy', metavar='URL',
+                   help='Proxy URL (http/https/socks4/socks5). Applies to '
+                        'HTTP method only. Example: socks5://127.0.0.1:10808')
+    p.add_argument('--proxy-user', help='Proxy username')
+    p.add_argument('--proxy-pass', help='Proxy password')
+
+    p.add_argument('-o', '--output-csv', metavar='FILE',
+                   help='Export results to CSV')
+    p.add_argument('--json', dest='output_json', metavar='FILE',
+                   help='Export results to JSON')
+
+    p.add_argument('--no-progress', action='store_true',
+                   help='Disable the live progress line')
+    p.add_argument('-q', '--quiet', action='store_true',
+                   help='Quiet mode: one-line-per-target output, script-friendly')
+    p.add_argument('--no-color', action='store_true',
+                   help='Disable colored output')
+    p.add_argument('-v', '--version', action='version',
+                   version=f'Network Ping Pro {__version__}')
+
+    return p
+
+
+def clamp_args(args):
+    args.count = max(1, min(200, args.count))
+    args.timeout = max(1.0, min(30.0, args.timeout))
+    args.workers = max(1, min(50, args.workers))
+    return args
+
+
+def load_targets_from_file(path: str) -> List[str]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    out = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            out.append(line)
+    return out
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main(argv=None) -> int:
+    Color.enable_windows_ansi()
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.no_color:
+        Color.disable()
+
+    all_targets = list(args.targets)
+    if args.file:
         try:
-            from tkinter import filedialog
-            file_path = filedialog.asksaveasfilename(defaultextension='.log', filetypes=[('Log files', '*.log')])
-            if not file_path:
-                return
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.writelines(self.log_lines)
-            
-            self.log_success(f"📤 Log saved to {file_path}")
-            messagebox.showinfo('Success', f'Log saved to {file_path}')
+            all_targets.extend(load_targets_from_file(args.file))
         except Exception as e:
-            self.log_error(f"Save log failed: {e}")
-            messagebox.showerror('Error', f'Save log failed: {e}')
+            print(f"{Color.RED}Failed to read file: {e}{Color.RESET}")
+            return 2
 
+    if not all_targets:
+        parser.print_help()
+        print(f"\n{Color.RED}Error: no targets specified.{Color.RESET}")
+        return 2
 
-# ============================================================
-# MAIN ENTRY POINT
-# ============================================================
+    args.targets = '\n'.join(all_targets)
+    args = clamp_args(args)
+
+    Renderer.banner()
+    print()
+
+    try:
+        runner = PingRunner(args)
+        return runner.run()
+    except KeyboardInterrupt:
+        print(f"\n{Color.YELLOW}Interrupted by user.{Color.RESET}")
+        return 130
+
 
 if __name__ == '__main__':
-    root = tk.Tk()
-    app = NetworkPingPro(root)
-    root.mainloop()
+    sys.exit(main())
