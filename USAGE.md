@@ -1,709 +1,497 @@
 # Network Ping Pro — Usage Guide
 
-This document explains how to use **Network Ping Pro**, including test methods, targets, files, options, metrics, exports, and practical examples.
+Complete reference for the `network-ping-pro` command. For installation
+see [INSTALL.md](INSTALL.md); for a short overview see [README.md](README.md).
+
+## Contents
+
+1. [Basic usage](#1-basic-usage)
+2. [Targets](#2-targets)
+3. [Methods: ICMP, TCP, HTTP](#3-methods-icmp-tcp-http)
+4. [Options reference](#4-options-reference)
+5. [Metrics explained](#5-metrics-explained)
+6. [Score and grade](#6-score-and-grade)
+7. [Reading the output](#7-reading-the-output)
+8. [CSV and JSON export](#8-csv-and-json-export)
+9. [Quiet mode and scripting](#9-quiet-mode-and-scripting)
+10. [Proxy](#10-proxy)
+11. [Exit codes](#11-exit-codes)
+12. [Practical examples](#12-practical-examples)
+13. [Recommended diagnostic workflow](#13-recommended-diagnostic-workflow)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
-# 1. Basic Usage
-
-The simplest command is:
+## 1. Basic usage
 
 ```bash
-python network_ping_pro.py google.com
+network-ping-pro <target> [target ...] [options]
 ```
 
-Linux/macOS:
+A target is a hostname, `host:port`, a URL, or `[IPv6]:port`.
+If you run from the repository without installing, use
+`python -m network_ping_pro` (or `python network_ping_pro.py`)
+in place of `network-ping-pro`.
 
 ```bash
-python3 network_ping_pro.py google.com
+network-ping-pro google.com
+network-ping-pro google.com github.com cloudflare.com
+network-ping-pro -m TCP google.com:443
+network-ping-pro -m HTTP https://example.com
 ```
 
-The program tests the target and reports the network results.
+With no targets the tool prints help and exits with code 2.
 
 ---
 
-# 2. Multiple Targets
+## 2. Targets
 
-You can test several targets in one command:
+| Form | Example | Used for |
+| ---- | ------- | -------- |
+| Hostname | `google.com` | ICMP, TCP (port 443), HTTP (https) |
+| Host + port | `google.com:443`, `1.1.1.1:53` | TCP, or HTTP on that port |
+| URL | `https://example.com/api?q=1` | HTTP (scheme, path and query kept) |
+| IPv6 | `[2606:4700:4700::1111]:443` | TCP / HTTP |
+
+Targets can also come from a file:
 
 ```bash
-python network_ping_pro.py google.com github.com cloudflare.com
+network-ping-pro -f targets.txt
 ```
 
-This is useful when comparing different services or networks.
-
-Example targets:
+`targets.txt` — one target per line, `#` for comments, commas and
+Persian commas (،) also work as separators:
 
 ```text
+# my targets
 google.com
 github.com
-cloudflare.com
-githubusercontent.com
-1.1.1.1
-8.8.8.8
+1.1.1.1:443
+https://example.com
 ```
+
+Rules:
+
+- Duplicate targets are tested once.
+- Invalid targets (e.g. `-n`, `host:0`, `host:65536`, `[:::]`) are
+  skipped and reported as `Skipped invalid target: ...`.
+- A host starting with `-` is always rejected, so a targets file can
+  never inject options into the `ping` command.
 
 ---
 
-# 3. ICMP Testing
+## 3. Methods: ICMP, TCP, HTTP
 
-ICMP is the traditional ping method.
-
-```bash
-python network_ping_pro.py google.com
-```
-
-You can also explicitly select ICMP if your version supports the method option:
+### ICMP (default)
 
 ```bash
-python network_ping_pro.py -m ICMP google.com
+network-ping-pro google.com
 ```
 
-ICMP testing is useful for measuring:
+Runs the system `ping` command and parses only the reply lines
+(`time=..ms`). The summary line (`rtt min/avg/max/mdev = ...`) is
+statistics, not replies, and is never counted as a ping. Results are
+capped at the requested count.
 
-* Latency
-* Packet loss
-* Network stability
-* Basic reachability
+### TCP
+
+```bash
+network-ping-pro -m TCP google.com:443
+network-ping-pro -m TCP 1.1.1.1:53 8.8.8.8:53
+```
+
+Opens a TCP connection to each target and measures connect time.
+Useful for checking whether a service port is open, e.g. 443 (HTTPS),
+80 (HTTP), 22 (SSH), 53 (DNS). The default port is 443.
+
+A refused connection means the host is reachable but the port is
+closed: the result is `reachable = true`, `test_success = false`,
+status `Refused`, grade `Failed`.
+
+### HTTP
+
+```bash
+network-ping-pro -m HTTP https://example.com
+```
+
+Runs `curl` (must be installed) and measures total time, connect time
+and time-to-first-byte. Redirects are followed (`curl -L`), and the
+reported status is the **most common** status code across the samples,
+not the highest — a mix of 200 and 500 is reported as
+`Mixed: 200x3, 500x1` with the full distribution in the export.
+
+`application_ok` is true when the reported status is 2xx or 3xx.
+A curl failure keeps the last curl error message
+(e.g. `No HTTP response (curl: (6) Could not resolve host: ...)`).
+
+DNS for HTTP is resolved by curl itself, so the separately measured
+DNS stage and the HTTP timings are not part of the same connection.
 
 ---
 
-# 4. TCP Testing
+## 4. Options reference
 
-TCP testing checks whether a TCP connection can be established to a specific host and port.
+| Option | Default | Limits | Meaning |
+| ------ | ------- | ------ | ------- |
+| `targets` | — | — | Hosts, `host:port`, URLs, `[IPv6]:port` |
+| `-f`, `--file FILE` | — | — | Read targets from a file |
+| `-m`, `--method` | `ICMP` | `ICMP` / `TCP` / `HTTP` | Test method |
+| `-c`, `--count N` | `10` | 1–200 | Pings per target |
+| `-t`, `--timeout SEC` | `3.0` | 1–30 | Timeout per ping, seconds |
+| `-w`, `--workers N` | `10` | 1–50 | Concurrent workers |
+| `--proxy URL` | — | http/https/socks4/socks5 | Proxy for HTTP only |
+| `--proxy-user USER` | — | — | Proxy username |
+| `--proxy-pass PASS` | `$NPP_PROXY_PASS` | — | Proxy password (prefer the env var) |
+| `-o`, `--output-csv FILE` | — | — | Export results to CSV |
+| `--json FILE` | — | — | Export results to JSON |
+| `--no-progress` | off | — | Disable the live progress line |
+| `-q`, `--quiet` | off | — | One line per target; logs go to stderr |
+| `--no-color` | off | — | Disable coloured output |
+| `-v`, `--version` | — | — | Print version and exit |
+| `-h`, `--help` | — | — | Print help and exit |
 
-Example:
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-Common ports:
-
-| Port | Typical Service |
-| ---: | --------------- |
-|   80 | HTTP            |
-|  443 | HTTPS           |
-|   22 | SSH             |
-|   25 | SMTP            |
-|   53 | DNS             |
-
-Examples:
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-```bash
-python network_ping_pro.py -m TCP github.com:443
-```
-
-```bash
-python network_ping_pro.py -m TCP example.com:80
-```
-
-TCP testing is useful when ICMP is blocked but the actual service is reachable.
+Values outside the limits are **clamped with a warning on stderr**,
+e.g. `Warning: count clamped 999 -> 200` — never silently.
 
 ---
 
-# 5. HTTP Testing
+## 5. Metrics explained
 
-HTTP testing measures the response of a web URL.
+All times are in milliseconds.
 
-Example:
+| Metric | Meaning |
+| ------ | ------- |
+| Avg | Mean of the samples |
+| Min / Max | Fastest / slowest sample |
+| Jitter | **Mean absolute difference between consecutive samples.** A simple stability indicator — not the RFC 3550 interarrival jitter |
+| P50 / P95 / P99 | Percentiles (linear interpolation between samples) |
+| Packet loss | `(attempts − successes) / attempts × 100` |
+| DNS avg | Time of the separate DNS resolution stage |
+| Connect avg | TCP connect time, or curl `time_connect` for HTTP |
+| TTFB avg | Time to first byte (HTTP only) |
+| Total avg | Total request time (HTTP only) |
 
-```bash
-python network_ping_pro.py -m HTTP https://google.com
+**Single-sample stages.** DNS is measured once, so its stage stats
+repeat that one sample as avg/min/max/p50/p95/p99. Percentiles of a
+single value carry no extra information — check the `samples` field
+in the JSON/CSV output to see how many measurements back the numbers.
+
+**What counts as a failure.** Each sample either produces a time or
+it does not. `attempts` is the requested count; `successes` is the
+number of samples with a time. Packet loss is computed from those two
+numbers, not from the ping program's own summary.
+
+---
+
+## 6. Score and grade
+
+The Score is a **custom heuristic** for comparing results within this
+tool. It is **not** an industry-standard benchmark.
+
+```
+Score = (latency × 0.40 + loss × 0.35 + jitter × 0.25)
+        × p95 penalty × application penalty
 ```
 
-Another example:
+Sub-scores (each 0–100):
 
-```bash
-python network_ping_pro.py -m HTTP https://github.com
-```
+Latency sub-score:
 
-HTTP testing is useful for measuring the actual response of a web service rather than simply testing ICMP connectivity.
+| avg (ms) | ≤ 10 | ≤ 25 | ≤ 50 | ≤ 100 | ≤ 200 | ≤ 500 | > 500 |
+| -------- | ---- | ---- | ---- | ----- | ----- | ----- | ----- |
+| score | 100 | 90 | 80 | 65 | 45 | 25 | 10 |
 
-### Requirement
+Loss sub-score:
 
-HTTP testing requires:
+| loss (%) | 0 | ≤ 1 | ≤ 5 | ≤ 10 | ≤ 20 | > 20 |
+| -------- | - | --- | --- | ---- | ---- | ---- |
+| score | 100 | 95 | 75 | 50 | 25 | 5 |
+
+Jitter sub-score:
+
+| jitter (ms) | ≤ 2 | ≤ 5 | ≤ 10 | ≤ 20 | > 20 |
+| ----------- | --- | --- | ---- | ---- | ---- |
+| score | 100 | 85 | 65 | 40 | 15 |
+
+Penalties:
+
+- **p95 penalty:** p95 more than 2× the average → ×0.85; more than
+  3× → ×0.70.
+- **Application penalty (HTTP only):** 4xx status → ×0.70;
+  5xx status → ×0.40. It applies only when `application_ok` is false.
+- A result with no successful samples scores **0.0**.
+
+Grades:
+
+| Score | Grade |
+| ----- | ----- |
+| ≥ 90 | Excellent |
+| ≥ 80 | Very Good |
+| ≥ 70 | Good |
+| ≥ 60 | Fair |
+| < 60 | Poor |
+| no measurements | Failed |
+
+---
+
+## 7. Reading the output
+
+Default output is a results table, a latency chart and a summary:
 
 ```text
-curl
+  #  Target        Method     Score  Grade       Avg ms  Loss  Status
+  1  google.com    ICMP        96.5  Excellent     12.3    0%  OK
+  2  github.com    ICMP        88.0  Very Good     24.1    0%  OK
 ```
 
-Check:
+- **Rank** is by Score (higher = better). Failed results are listed
+  after the successful ones, unranked.
+- The summary lists total/reachable/successful/failed counts, the
+  lowest and highest latency, the highest score, mixed HTTP statuses
+  and the first failures with their errors.
+- The footer repeats the two honesty notes: the Score is a custom
+  heuristic, and DNS is measured separately from the connection.
+
+Status values you may see: `OK`, `Partial` (< 20% loss),
+`High Loss` (≥ 20% loss), `Refused` (TCP port closed, host reachable),
+`Timeout`, `DNS Error`, `Unreachable`, `No Response`, `Cancelled`,
+`Error`, `Failed`, and HTTP statuses such as `HTTP 404 Not Found`
+or `Mixed: 200x3, 500x1`.
+
+---
+
+## 8. CSV and JSON export
 
 ```bash
-curl --version
+network-ping-pro -o results.csv --json results.json google.com
 ```
+
+### CSV columns
+
+```text
+Rank, Target, Method, Reachable, TestSuccess, ApplicationOK,
+Score, Grade, Avg, Min, Max, Jitter, P50, P95, P99, Loss %,
+Status, Error, Resolved IP, Family,
+DNS avg, Connect avg, TTFB avg, Total avg,
+HTTP status, HTTP distribution
+```
+
+`HTTP distribution` is a `code:count;code:count` list, e.g. `200:3;500:1`.
+
+### JSON structure
+
+```json
+{
+  "tool": "Network Ping Pro",
+  "version": "1.1.0",
+  "timestamp": "2026-11-06T18:00:00",
+  "method": "ICMP",
+  "count": 10,
+  "timeout": 3.0,
+  "total": 2,
+  "results": [
+    {
+      "target": "google.com",
+      "method": "ICMP",
+      "reachable": true,
+      "test_success": true,
+      "application_ok": null,
+      "times": [12.1, 11.8],
+      "attempts": 10,
+      "successes": 10,
+      "avg": 12.0, "min": 11.8, "max": 12.1,
+      "jitter": 0.3, "p50": 12.0, "p95": 12.1, "p99": 12.1,
+      "packet_loss": 0.0,
+      "status": "OK",
+      "error": null,
+      "resolved_ip": "142.250.72.14",
+      "ip_family": "IPv4",
+      "rank": 1,
+      "score": 96.5,
+      "grade": "Excellent",
+      "dns": {"avg": 8.2, "min": 8.2, "max": 8.2,
+              "p50": 8.2, "p95": 8.2, "p99": 8.2, "samples": 1},
+      "connect": {"avg": null, "samples": 0},
+      "ttfb": {"avg": null, "samples": 0},
+      "total": {"avg": null, "samples": 0},
+      "http_status": null,
+      "http_status_text": null,
+      "http_status_distribution": null,
+      "port": null
+    }
+  ]
+}
+```
+
+A failed export is not silent: the command exits with code 1.
 
 ---
 
-# 6. Test Targets from a File
-
-Create:
-
-```text
-targets.txt
-```
-
-Example:
-
-```text
-google.com
-github.com
-cloudflare.com
-1.1.1.1
-8.8.8.8
-```
-
-Run:
+## 9. Quiet mode and scripting
 
 ```bash
-python network_ping_pro.py -f targets.txt
+network-ping-pro -q google.com github.com
 ```
 
-This is useful when you have many targets.
+Quiet mode prints **no banner** and sends all logs to **stderr**, so
+stdout stays one line per target and is safe to parse:
 
----
+```text
+OK    google.com                               score= 96.5 avg=   12.3ms loss=   0% OK
+FAIL  bad.example                              DNS Error  DNS: Name or service not known
+```
 
-# 7. Test Count
-
-If your installed version exposes a count option, use it to control how many tests are performed for each target.
-
-Example:
+Useful patterns:
 
 ```bash
-python network_ping_pro.py google.com --count 20
-```
+# Fail a CI step if any target fails (exit code 1)
+network-ping-pro -q google.com || echo "network problem"
 
-A larger number of tests provides more samples for latency and jitter calculations.
+# Only the failures
+network-ping-pro -q google.com bad.example | grep '^FAIL'
+
+# Machine-readable results for a script
+network-ping-pro -q -o /tmp/out.csv google.com
+```
 
 ---
 
-# 8. Timeout
+## 10. Proxy
 
-A timeout determines how long the program waits for a response.
-
-Example:
+Proxy applies to the **HTTP method only**. ICMP cannot traverse a
+proxy; TCP does not route through one.
 
 ```bash
-python network_ping_pro.py google.com --timeout 5
+# SOCKS5 proxy (e.g. v2ray / Hiddify)
+network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 https://example.com
+
+# With a username (password via env var, see below)
+network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 \
+    --proxy-user USER https://example.com
+
+# HTTP proxy
+network-ping-pro -m HTTP --proxy http://127.0.0.1:8080 https://example.com
 ```
 
-A shorter timeout is useful for quick diagnostics.
-
-A longer timeout can help when testing slow or unstable connections.
-
----
-
-# 9. Concurrent Testing
-
-Network Ping Pro can perform tests concurrently when supported by the installed version.
-
-This is useful when testing many targets.
-
-Example:
-
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com --workers 5
-```
-
-The number of workers controls how many tests can run at the same time.
-
----
-
-# 10. Metrics
-
-Network Ping Pro can calculate several network metrics.
-
-## Average
-
-Average latency across successful tests.
-
-Example:
-
-```text
-Average: 24.5 ms
-```
-
-Lower latency generally means a faster response time.
-
----
-
-## Minimum
-
-The fastest successful response.
-
-```text
-Min: 19.2 ms
-```
-
----
-
-## Maximum
-
-The slowest successful response.
-
-```text
-Max: 41.8 ms
-```
-
----
-
-## Jitter
-
-Jitter describes variation in latency.
-
-For example:
-
-```text
-20 ms
-21 ms
-20 ms
-22 ms
-21 ms
-```
-
-has relatively stable latency.
-
-A result such as:
-
-```text
-15 ms
-80 ms
-20 ms
-150 ms
-18 ms
-```
-
-has much higher variation.
-
-Jitter can be important for:
-
-* Voice calls
-* Video calls
-* Online games
-* Real-time applications
-
----
-
-# 11. Packet Loss
-
-Packet loss shows how many tests failed to receive a response.
-
-Example:
-
-```text
-Sent: 20
-Received: 19
-Loss: 5%
-```
-
-A high packet-loss percentage can indicate an unstable connection, filtering, congestion, or other network conditions.
-
----
-
-# 12. P95 Latency
-
-P95 means the 95th percentile latency.
-
-It answers a practical question:
-
-> What latency were 95% of successful measurements at or below?
-
-Example:
-
-```text
-Average: 25 ms
-P95:     41 ms
-```
-
-This can reveal occasional slow responses that the average may hide.
-
----
-
-# 13. P99 Latency
-
-P99 is the 99th percentile latency.
-
-It focuses on the slowest part of the successful measurements.
-
-Example:
-
-```text
-Average: 25 ms
-P95:     41 ms
-P99:     70 ms
-```
-
-P99 can be useful when investigating occasional latency spikes.
-
----
-
-# 14. Score / Grade
-
-Depending on the version and configuration, Network Ping Pro may calculate an overall network score or grade from the collected measurements.
-
-Treat this as a simplified diagnostic indicator rather than an official measurement of internet quality.
-
-The raw metrics such as:
-
-* Average
-* Min
-* Max
-* Jitter
-* P95
-* P99
-* Packet Loss
-
-are more useful when performing detailed analysis.
-
----
-
-# 15. Export Results
-
-Network Ping Pro supports result exporting when the corresponding export options are available in your version.
-
-Typical formats include:
-
-```text
-CSV
-JSON
-```
-
-CSV is useful for:
-
-* Excel
-* Google Sheets
-* Data analysis
-
-JSON is useful for:
-
-* Scripts
-* APIs
-* Automation
-* Further processing
-
-Use:
-
-```bash
-python network_ping_pro.py --help
-```
-
-to see the exact export arguments supported by your installed version.
-
----
-
-# 16. Proxy
-
-Proxy applies to HTTP tests only (ICMP cannot use a proxy, and TCP
-does not route through one).
-
-```bash
-python network_ping_pro.py -m HTTP --proxy socks5://127.0.0.1:10808 https://google.com
-python network_ping_pro.py -m HTTP --proxy http://127.0.0.1:8080 --proxy-user alice --proxy-pass secret https://example.com
-```
-
-| Flag | Description |
-| ---- | ----------- |
-| `--proxy URL` | Proxy URL (`http` / `https` / `socks4` / `socks5`), e.g. `socks5://127.0.0.1:10808` |
-| `--proxy-user USER` | Proxy username |
-| `--proxy-pass PASS` | Proxy password |
-
-Do not put the password in the proxy URL (`socks5://user:pass@host:port`)
-and avoid `--proxy-pass` on shared machines: both are visible to other
-users via `ps` and in shell history. Prefer the `NPP_PROXY_PASS`
-environment variable instead:
+**Password safety.** The password is never printed in logs or
+terminal output — logs show only `scheme://host:port`. Prefer the
+environment variable over `--proxy-pass`: a password on the command
+line is visible to other users via `ps` and shell history.
 
 ```bash
 export NPP_PROXY_PASS='secret'
-python network_ping_pro.py -m HTTP --proxy socks5://127.0.0.1:10808 --proxy-user alice https://example.com
+network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 https://example.com
 ```
 
-The proxy is never printed with credentials: the log only shows
-`scheme://host:port`.
+A password can also be embedded in the proxy URL
+(`socks5://user:pass@host:port`); it is URL-encoded before being
+passed to curl and is never logged.
 
 ---
 
-# 17. No-Color Mode
+## 11. Exit codes
 
-If your version supports disabling terminal colors:
-
-```bash
-python network_ping_pro.py --no-color google.com
-```
-
-This is useful when:
-
-* Redirecting output to a file
-* Using terminals with poor color support
-* Copying output
-* Running automated scripts
+| Code | Meaning |
+| ---- | ------- |
+| 0 | All targets tested successfully |
+| 1 | At least one target failed, or a CSV/JSON export failed |
+| 2 | Usage error: no targets, invalid proxy, unreadable targets file |
+| 130 | Interrupted with Ctrl+C |
 
 ---
 
-# 18. Help
-
-The most important command for discovering the options supported by your exact version is:
+## 12. Practical examples
 
 ```bash
-python network_ping_pro.py --help
-```
+# Check Google
+network-ping-pro google.com
 
-It should show:
+# Check several services at once
+network-ping-pro google.com github.com cloudflare.com
 
-* Available commands
-* Test methods
-* Options
-* Defaults
-* Input formats
+# Check HTTPS with TCP (is port 443 open?)
+network-ping-pro -m TCP google.com:443 github.com:443
 
-Always use `--help` if an option documented elsewhere does not work.
+# Check HTTP response time and status
+network-ping-pro -m HTTP https://example.com https://www.wikipedia.org
 
----
+# Test many targets from a file
+network-ping-pro -f targets.txt
 
-# 19. Practical Examples
+# Run more samples for a stable average
+network-ping-pro -c 50 google.com
 
-## Check Google
+# Increase timeout for slow networks
+network-ping-pro -t 10 google.com
 
-```bash
-python network_ping_pro.py google.com
-```
+# Test multiple targets concurrently (default: 10 workers)
+network-ping-pro -w 20 google.com github.com cloudflare.com
 
-## Check several services
+# Disable terminal colours (e.g. for a log file)
+network-ping-pro --no-color google.com
 
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com
-```
-
-## Check HTTPS with TCP
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-## Check HTTP response
-
-```bash
-python network_ping_pro.py -m HTTP https://google.com
-```
-
-## Check many targets from a file
-
-```bash
-python network_ping_pro.py -f targets.txt
-```
-
-## Run more samples
-
-```bash
-python network_ping_pro.py google.com --count 20
-```
-
-## Increase timeout
-
-```bash
-python network_ping_pro.py google.com --timeout 5
-```
-
-## Test multiple targets concurrently
-
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com --workers 5
-```
-
-## Disable terminal colors
-
-```bash
-python network_ping_pro.py --no-color google.com
+# Full run: 20 samples, exports, quiet
+network-ping-pro -q -c 20 -o results.csv --json results.json google.com
 ```
 
 ---
 
-# 20. Recommended Diagnostic Workflow
+## 13. Recommended diagnostic workflow
 
-When troubleshooting a network problem, start simple.
-
-### Step 1 — ICMP
-
-```bash
-python network_ping_pro.py google.com
-```
-
-If this works, basic connectivity is available.
-
-### Step 2 — TCP
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-This checks connectivity to HTTPS through TCP.
-
-### Step 3 — HTTP
-
-```bash
-python network_ping_pro.py -m HTTP https://google.com
-```
-
-This checks the actual web service.
-
-### Step 4 — Multiple Targets
-
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com
-```
-
-Comparing several destinations can help identify whether a problem affects one destination or the wider connection.
+1. **ICMP first** — is the host reachable at all, and what is the
+   baseline latency and loss?
+   ```bash
+   network-ping-pro google.com
+   ```
+2. **TCP next** — is the service port open?
+   ```bash
+   network-ping-pro -m TCP google.com:443
+   ```
+   A `Refused` here with ICMP working means the host is up but the
+   service is down or firewalled.
+3. **HTTP last** — does the application answer, and with what status?
+   ```bash
+   network-ping-pro -m HTTP https://google.com
+   ```
+   A 200 with high latency is a network problem; a 5xx with low
+   latency is an application problem.
+4. **Compare targets** — run several at once and read the ranking:
+   ```bash
+   network-ping-pro google.com github.com cloudflare.com
+   ```
 
 ---
 
-# 21. Example targets.txt
+## 14. Troubleshooting
 
-```text
-google.com
-github.com
-cloudflare.com
-1.1.1.1
-8.8.8.8
-```
+**`curl not installed (required for HTTP)`**
+Install curl: Windows 10+ has it preinstalled; on Debian/Ubuntu
+`sudo apt install curl`; on macOS it is preinstalled.
 
-Run:
+**ICMP fails with "Operation not permitted" (Linux)**
+The tool runs the system `ping` command; in restricted containers
+raw sockets may be blocked. TCP mode works without that permission:
+`network-ping-pro -m TCP google.com:443`.
 
-```bash
-python network_ping_pro.py -f targets.txt
-```
+**`DNS Error` for every target**
+Check your DNS settings. The tool resolves names with the system
+resolver; a VPN or proxy that only handles browser traffic will not
+help the CLI.
 
----
+**`No targets specified` / exit code 2**
+You passed no targets, or every line of your targets file was a
+comment/blank. Invalid entries are reported as
+`Skipped invalid target: ...` on stderr.
 
-# 22. Understanding the Results
+**Colours look broken / escape codes in a log file**
+Use `--no-color`, or `-q` for script output.
 
-A typical diagnostic result may contain measurements such as:
+**A value was clamped**
+`count` is limited to 1–200, `timeout` to 1–30 s and `workers` to
+1–50. Out-of-range values are clamped with a warning on stderr,
+e.g. `Warning: count clamped 999 -> 200`.
 
-```text
-Average
-Minimum
-Maximum
-Jitter
-P95
-P99
-Packet Loss
-```
-
-Do not rely on one number alone.
-
-For example:
-
-```text
-Average: 25 ms
-Max:     120 ms
-Jitter:  18 ms
-Loss:    0%
-```
-
-The average looks reasonable, but the high maximum and jitter indicate that some requests experienced significant delay.
-
----
-
-# 23. Troubleshooting with Network Ping Pro
-
-## ICMP fails but TCP works
-
-Possible causes include:
-
-* ICMP filtering
-* Firewall rules
-* Destination configuration
-
-Try:
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
----
-
-## TCP works but HTTP fails
-
-Possible causes include:
-
-* HTTP-specific filtering
-* Proxy configuration
-* TLS issues
-* Application-level problems
-* curl configuration
-
-Check:
-
-```bash
-curl --version
-```
-
----
-
-## High packet loss
-
-Check multiple targets:
-
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com
-```
-
-If several independent targets show loss, the issue may be closer to your local network or internet connection.
-
-If only one target is affected, the problem may be specific to that destination or path.
-
----
-
-## High jitter
-
-Run more samples:
-
-```bash
-python network_ping_pro.py google.com --count 20
-```
-
-Then compare:
-
-* Average
-* Maximum
-* Jitter
-* P95
-* P99
-
----
-
-# 24. Automation
-
-Because Network Ping Pro is a command-line application, it can be used by:
-
-* Windows batch scripts
-* PowerShell
-* Bash
-* Cron jobs
-* CI/CD systems
-* Monitoring scripts
-* Python automation
-* Other command-line tools
-
-For automation, JSON or CSV output can be particularly useful when supported by the installed version.
-
----
-
-# 25. Find Every Option Supported by Your Version
-
-The definitive reference is always:
-
-```bash
-python network_ping_pro.py --help
-```
-
-This is important because command-line options may change between versions.
-
----
-
-## License
-
-Network Ping Pro is released under the MIT License.
+**A run is slow**
+Each target takes up to `count × timeout` seconds in the worst case;
+targets run concurrently (`-w`, default 10). Lower `-c` or `-t`
+for a quick check.

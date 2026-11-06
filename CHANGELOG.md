@@ -1,6 +1,49 @@
 # Changelog
 
-## Unreleased
+All notable changes to this project are documented here.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [1.1.0] - Unreleased
+
+### Changed
+- The single 1600-line `network_ping_pro.py` is now a package:
+  `network_ping_pro/` with modules for colours (`color.py`), data
+  models (`models.py`), statistics and scoring (`stats.py`), DNS
+  (`dns.py`), the measurement engines (`engine.py`), target parsing
+  (`targets.py`), rendering (`render.py`), the runner (`runner.py`)
+  and the CLI (`cli.py`). The public API is unchanged — every name
+  is still importable as `from network_ping_pro import X`.
+- `network_ping_pro.py` is now a thin shim, so
+  `python network_ping_pro.py ...` keeps working. The recommended
+  ways to run the tool are the installed `network-ping-pro` command
+  and `python -m network_ping_pro`.
+- README, USAGE and INSTALL were rewritten: every flag is documented
+  with its real default and limits, the Score formula and grade
+  thresholds are explained, exit codes and the CSV/JSON columns are
+  listed, and the proxy/quiet-mode sections describe the actual
+  behaviour. INSTALL is now a short guide instead of 450 lines for a
+  standard-library-only tool.
+
+### Fixed
+- TCP "connection refused" now gets grade `Failed` instead of `Poor`,
+  matching what `_finalize()` assigns to any result with no samples.
+- Jitter is now documented where it is defined: it is the mean
+  absolute difference between consecutive samples, not RFC 3550
+  interarrival jitter. The same note is in USAGE.md.
+- Single-sample stage stats (e.g. DNS, measured once) are now
+  documented: p50/p95/p99 repeat that one sample, and the `samples`
+  field says how many measurements back the numbers.
+
+### Added
+- `test_package.py`: tests for the package layout, the public API
+  re-exports, the `python -m` / shim entry points, the version
+  matching `pyproject.toml`, and the documented stats behaviour.
+- Real-network tests are now marked with `@pytest.mark.network`;
+  the unused `slow` marker was removed from `pytest.ini`.
+- `pip install -e ".[dev]"` now installs the test dependency
+  (pytest) as well.
+
+## [1.0.0] - 2026-11-06
 
 ### Fixed
 - Score weights now sum to 1.00 (latency 0.40, loss 0.35, jitter 0.25),

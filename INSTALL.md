@@ -1,450 +1,174 @@
 # Network Ping Pro — Installation Guide
 
-Complete installation and first-run guide for **Windows, Linux, and macOS**.
-
-This guide is written for both beginners and experienced users.
-
----
-
-## Table of Contents
-
-* [Requirements](#requirements)
-* [Windows](#windows)
-* [Linux](#linux)
-* [macOS](#macos)
-* [Download the Project](#download-the-project)
-* [First Run](#first-run)
-* [Common Problems](#common-problems)
-* [Quick Reference](#quick-reference)
-
----
-
 ## Requirements
 
-| Requirement | Purpose                  |
-| ----------- | ------------------------ |
-| Python 3.9+ | Running Network Ping Pro |
-| ping        | ICMP testing             |
-| curl        | HTTP testing             |
-| Terminal    | Running commands         |
-| Git         | Optional, for cloning    |
+| Requirement | Purpose | Notes |
+| ----------- | ------- | ----- |
+| Python 3.9+ | Runs the tool | Check with `python --version` / `python3 --version` |
+| `curl` | HTTP method only | Preinstalled on Windows 10+ and macOS |
+| `ping` | ICMP method only | System `ping` command |
+| git (optional) | Cloning the repo | Or download the ZIP from GitHub |
 
-No Python packages are required unless the project's `requirements.txt` specifies otherwise.
-
----
-
-# Windows
-
-## Step 1 — Install Python
-
-Go to:
-
-https://www.python.org/downloads/
-
-Download the latest supported Python version.
-
-Run the installer.
-
-### Important
-
-On the first installer screen, enable:
-
-```text
-Add python.exe to PATH
-```
-
-Then select:
-
-```text
-Install Now
-```
-
-Wait for the installation to finish.
+The tool has **no runtime Python dependencies** — it uses only the
+standard library. `pytest` is needed only to run the tests.
 
 ---
 
-## Step 2 — Verify Python
-
-Open Command Prompt:
-
-1. Press `Win`
-2. Type `cmd`
-3. Press Enter
-
-Run:
-
-```cmd
-python --version
-```
-
-You should see something similar to:
-
-```text
-Python 3.12.x
-```
-
-Python 3.9 or newer is required.
-
----
-
-## Step 3 — Verify curl
-
-For HTTP testing:
-
-```cmd
-curl --version
-```
-
-Modern Windows versions normally include curl.
-
-If curl is unavailable, install it from:
-
-https://curl.se/windows/
-
-You can still use ICMP and TCP testing without curl.
-
----
-
-## Step 4 — Download Network Ping Pro
-
-### Option A — Git
-
-If Git is installed:
-
-```cmd
-git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
-cd Network-Ping-Pro
-```
-
-### Option B — ZIP
-
-Open:
-
-https://github.com/erffanhub-00/Network-Ping-Pro
-
-Select:
-
-```text
-Code → Download ZIP
-```
-
-Extract the ZIP.
-
-Then open Command Prompt in the extracted folder.
-
-Example:
-
-```cmd
-cd /d "D:\tools\Network-Ping-Pro"
-```
-
----
-
-## Step 5 — Run the Program
-
-```cmd
-python network_ping_pro.py google.com
-```
-
-If everything is installed correctly, the program will start the network test.
-
----
-
-# Linux
-
-## Debian / Ubuntu
-
-```bash
-sudo apt update
-sudo apt install python3 curl git
-```
-
-## Fedora / RHEL
-
-```bash
-sudo dnf install python3 curl git
-```
-
-## Arch Linux
-
-```bash
-sudo pacman -S python curl git
-```
-
-Clone the project:
-
-```bash
-git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
-cd Network-Ping-Pro
-```
-
-Run:
-
-```bash
-python3 network_ping_pro.py google.com
-```
-
----
-
-# macOS
-
-The easiest approach is Homebrew.
-
-Install Homebrew if necessary:
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-Install Python:
-
-```bash
-brew install python
-```
-
-Clone the project:
-
-```bash
-git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
-cd Network-Ping-Pro
-```
-
-Run:
-
-```bash
-python3 network_ping_pro.py google.com
-```
-
----
-
-# Download the Project
-
-There are two common ways.
-
-## Git
-
-```bash
-git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
-cd Network-Ping-Pro
-```
-
-## ZIP
-
-Download:
-
-https://github.com/erffanhub-00/Network-Ping-Pro
-
-Then:
-
-```text
-Code → Download ZIP
-```
-
-Extract the project and open a terminal inside its directory.
-
----
-
-# First Run
-
-Start with the simplest test:
+## 1. Install Python
 
 ### Windows
 
-```cmd
-python network_ping_pro.py google.com
-```
+Download the installer from [python.org/downloads](https://www.python.org/downloads/)
+and check **"Add Python to PATH"** during installation. Then verify:
 
-### Linux / macOS
-
-```bash
-python3 network_ping_pro.py google.com
-```
-
-If the command works, Network Ping Pro is ready.
-
-For all available commands:
-
-```bash
-python network_ping_pro.py --help
-```
-
----
-
-# Common Problems
-
-## Python was not found
-
-Run:
-
-```cmd
-where python
-```
-
-If nothing is returned, Python may not be installed or may not be in PATH.
-
-### Solution 1 — Reinstall Python
-
-Download Python from:
-
-https://www.python.org/downloads/
-
-During installation enable:
-
-```text
-Add python.exe to PATH
-```
-
-Then close and reopen Command Prompt.
-
-Test:
-
-```cmd
+```powershell
 python --version
 ```
 
----
+If `python` opens the Microsoft Store instead, either use the `py`
+launcher (`py --version`) or reinstall Python with the PATH option
+checked.
 
-## Python opens Microsoft Store
-
-Windows may have Python App Execution Aliases enabled.
-
-Open:
-
-```text
-Settings
-→ Apps
-→ Advanced app settings
-→ App execution aliases
-```
-
-Disable the Python aliases if they are intercepting the `python` command.
-
-Open a new terminal and try:
-
-```cmd
-python --version
-```
-
----
-
-## Python works with `py` but not `python`
-
-Try:
-
-```cmd
-py --version
-```
-
-If that works, you can run:
-
-```cmd
-py network_ping_pro.py google.com
-```
-
----
-
-## curl is missing
-
-Check:
+### Debian / Ubuntu
 
 ```bash
-curl --version
+sudo apt update
+sudo apt install python3 python3-pip curl git
 ```
 
-If it is unavailable, install curl for your operating system.
+### Fedora / RHEL
 
-HTTP testing requires curl.
+```bash
+sudo dnf install python3 python3-pip curl git
+```
 
-ICMP and TCP testing do not require curl.
+### Arch Linux
+
+```bash
+sudo pacman -S python python-pip curl git
+```
+
+### macOS
+
+Python and curl are preinstalled. If you want a newer Python, use
+[Homebrew](https://brew.sh/):
+
+```bash
+brew install python curl git
+```
+
+Verify on any system:
+
+```bash
+python3 --version   # should be 3.9 or newer
+curl --version      # needed for HTTP tests
+```
 
 ---
 
-## Permission / Firewall problems
-
-Some operating systems or security software may restrict network operations.
-
-If ICMP testing does not work, try TCP:
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-If TCP works while ICMP does not, the problem may be related to ICMP permissions or firewall rules.
-
----
-
-## Colors do not appear correctly
-
-If supported by your version, use:
-
-```bash
-python network_ping_pro.py --no-color google.com
-```
-
-You can also use Windows Terminal instead of the legacy Command Prompt.
-
----
-
-## SyntaxError
-
-Check your Python version:
-
-```bash
-python --version
-```
-
-or:
-
-```bash
-python3 --version
-```
-
-Network Ping Pro requires Python 3.9+.
-
----
-
-# Quick Reference
-
-## Windows
-
-```cmd
-git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
-cd Network-Ping-Pro
-python network_ping_pro.py google.com
-```
-
-## Linux / macOS
+## 2. Get the project
 
 ```bash
 git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
 cd Network-Ping-Pro
-python3 network_ping_pro.py google.com
 ```
 
-## Check Python
+Or download the ZIP from
+[github.com/erffanhub-00/Network-Ping-Pro](https://github.com/erffanhub-00/Network-Ping-Pro)
+and extract it.
+
+---
+
+## 3. Install the command
+
+From the project directory:
 
 ```bash
-python --version
+pip install .
 ```
 
-## Show Help
+This installs the `network-ping-pro` command. For development
+(editable install + pytest):
 
 ```bash
-python network_ping_pro.py --help
+pip install -e ".[dev]"
+```
+
+On Linux/macOS you may need `pip3` instead of `pip`, or
+`python3 -m pip install .` if `pip` is not on your PATH.
+
+To run without installing, use the repository directory directly:
+
+```bash
+python -m network_ping_pro google.com
+# or
+python network_ping_pro.py google.com
 ```
 
 ---
 
-# Need Help?
+## 4. Verify
 
-If the program does not work, open an issue:
+```bash
+network-ping-pro --version
+network-ping-pro google.com
+```
 
-https://github.com/erffanhub-00/Network-Ping-Pro/issues
+You should see a results table. If the target is unreachable from
+your network, you will see a `DNS Error` or `Timeout` row instead —
+that is a network result, not an install problem.
 
-Include:
+Run the test suite (needs the dev install):
 
-* Operating system
-* Python version
-* Exact command
-* Complete error message
-* Relevant terminal output
+```bash
+python -m pytest -q
+```
+
+---
+
+## Common problems
+
+**`Python was not found` (Windows)**
+Python is not on PATH. Reinstall with "Add Python to PATH" checked,
+or use the `py` launcher: `py -m pip install .` and then
+`py -m network_ping_pro google.com`.
+
+**`pip: command not found`**
+Use `python -m pip install .` (Windows) or `python3 -m pip install .`
+(Linux/macOS). On Debian/Ubuntu, `sudo apt install python3-pip`.
+
+**`curl not installed` when testing HTTP**
+Windows 10+ and macOS have curl preinstalled. On Debian/Ubuntu:
+`sudo apt install curl`. ICMP and TCP tests do not need curl.
+
+**ICMP fails with "Operation not permitted" (Linux containers)**
+The system `ping` needs raw-socket permission, which restricted
+containers may block. TCP mode does not need it:
+`network-ping-pro -m TCP google.com:443`.
+
+**Colours look broken / escape codes in output**
+Use `--no-color`, or `-q` for script-friendly output.
+
+**`SyntaxError` when running**
+You are using Python 2 or a Python older than 3.9. Check with
+`python --version` and install Python 3.9+.
+
+---
+
+## Quick reference
+
+```bash
+# Windows
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
+pip install .
+network-ping-pro google.com
+
+# Linux / macOS
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
+pip install .
+network-ping-pro google.com
+```
+
+See [USAGE.md](USAGE.md) for all commands and options.

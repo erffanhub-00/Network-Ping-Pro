@@ -1,354 +1,244 @@
 # Network Ping Pro
 
-A lightweight and practical network diagnostic tool for testing **ICMP, TCP, and HTTP connectivity and latency** from your local machine.
+A command-line network diagnostic tool for testing **ICMP, TCP and HTTP
+connectivity and latency** from your own machine — no monitoring server,
+no account, no external service.
 
-> 🌐 **Project:** [Network Ping Pro](https://github.com/erffanhub-00/Network-Ping-Pro)
-> 📖 **Installation Guide:** [INSTALL.md](INSTALL.md)
-> 📚 **Usage Guide:** [USAGE.md](USAGE.md)
-
-Network Ping Pro is designed to provide useful network measurements without requiring a complicated monitoring platform or external service.
-
----
-
-## ✦ Features
-
-* ICMP ping testing
-* TCP connection testing
-* HTTP response testing
-* Multiple target testing
-* Targets loaded from a file
-* Configurable test count
-* Configurable timeout
-* Concurrent testing
-* Average latency
-* Minimum latency
-* Maximum latency
-* Jitter calculation
-* Packet loss measurement
-* P95 latency
-* P99 latency
-* Network score / grade
-* Detailed test results
-* Colored terminal output
-* No-color mode
-* CSV / JSON export
-* Proxy support for HTTP testing
-* Local machine testing
-* No external monitoring server required
-
-For complete usage examples, see **[USAGE.md](USAGE.md)**.
-
----
-
-## ✦ What Is Network Ping Pro?
-
-Network Ping Pro is a command-line network diagnostic tool written in Python.
-
-Instead of relying on a website to perform a network test, the tool runs tests **directly from your own computer**.
-
-This makes it useful for checking:
-
-* Internet connectivity
-* Website accessibility
-* Network latency
-* TCP connectivity
-* HTTP response time
-* Packet loss
-* Connection stability
-* Differences between network targets
-
----
-
-## ✦ Test Methods
-
-### ICMP
-
-Traditional ping testing.
+> 📖 **Installation:** [INSTALL.md](INSTALL.md)
+> 📚 **Full usage reference:** [USAGE.md](USAGE.md)
+> 📝 **Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
 ```bash
-python network_ping_pro.py google.com
+network-ping-pro google.com github.com
+network-ping-pro -m TCP google.com:443
+network-ping-pro -m HTTP https://example.com
 ```
-
-Useful for measuring basic network latency and packet loss.
-
-### TCP
-
-Tests whether a TCP connection can be established to a specific port.
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-Useful for checking services such as:
-
-```text
-443  HTTPS
-80   HTTP
-22   SSH
-25   SMTP
-53   DNS
-```
-
-### HTTP
-
-Tests an HTTP/HTTPS URL and measures response time.
-
-```bash
-python network_ping_pro.py -m HTTP https://google.com
-```
-
-HTTP testing requires `curl`.
 
 ---
 
-## ✦ Tech Stack
+## What it measures
 
-| Technology              | Purpose                  |
-| ----------------------- | ------------------------ |
-| Python 3.9+             | Core application         |
-| ICMP / ping             | Network latency testing  |
-| TCP sockets             | TCP connectivity testing |
-| curl                    | HTTP testing             |
-| Threading / concurrency | Parallel tests           |
-| CSV / JSON              | Result export            |
+For each target the tool reports:
+
+| Metric | Meaning |
+| ------ | ------- |
+| Avg / Min / Max | Latency in milliseconds across the samples |
+| Jitter | Mean absolute difference between consecutive samples (see note below) |
+| P50 / P95 / P99 | Latency percentiles |
+| Packet loss | Share of failed samples, in percent |
+| Score (0–100) | Custom diagnostic score for comparing results *within this tool* |
+| Grade | Excellent / Very Good / Good / Fair / Poor / Failed |
+| Status | OK, Partial, High Loss, Refused, Timeout, DNS Error, … |
+
+Three outcome flags are tracked independently: **reachable** (the host
+answered at all), **test_success** (usable measurements were collected)
+and **application_ok** (HTTP only: the status code was 2xx/3xx).
+
+### Methods
+
+| Method | How it works | Needs |
+| ------ | ------------ | ----- |
+| ICMP (default) | Runs the system `ping` command | `ping` |
+| TCP | Opens a TCP connection to `host:port` (default 443) | — |
+| HTTP | Runs `curl` and reads its timing variables | `curl` |
+
+DNS resolution is measured **separately** from the connection: for TCP
+the connection is made to the IP resolved in the DNS stage, so both
+belong to the same attempt; for HTTP, curl resolves DNS internally.
+
+### The Score, honestly
+
+The Score is a **custom heuristic**, not an industry-standard benchmark.
+It exists so you can rank targets against each other in one run.
+
+```
+Score = (latency × 0.40 + loss × 0.35 + jitter × 0.25)
+        × p95 penalty × application penalty
+```
+
+- Latency, loss and jitter are each converted to a 0–100 sub-score
+  (e.g. avg ≤ 10 ms → 100, 0% loss → 100, jitter ≤ 2 ms → 100).
+- If p95 is more than 2× the average, the score is penalised
+  (×0.85, or ×0.70 above 3×).
+- For HTTP, a 4xx status penalises ×0.70 and a 5xx ×0.40.
+- Grades: ≥ 90 Excellent, ≥ 80 Very Good, ≥ 70 Good, ≥ 60 Fair,
+  otherwise Poor; a result with no measurements is Failed.
+
+Jitter here is the **mean absolute difference between consecutive
+samples** — a simple stability indicator, not the RFC 3550 interarrival
+jitter. Stage stats with a single sample (DNS is measured once) repeat
+that sample as avg/min/max/p50/p95/p99; the `samples` field in the
+JSON/CSV output says how many measurements back the numbers.
 
 ---
 
-## ✦ Installation
+## Installation
 
-### Requirements
-
-* Python **3.9+**
-* `curl` for HTTP testing
-* `ping` support for ICMP testing
-* Windows, Linux, or macOS
-
-### Quick Install
-
-Clone the repository:
+Requires **Python 3.9+**. HTTP testing additionally needs `curl`;
+ICMP testing needs the system `ping` command.
 
 ```bash
 git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
 cd Network-Ping-Pro
+
+pip install .            # installs the `network-ping-pro` command
+# or, for development:
+pip install -e ".[dev]"  # editable install + pytest
 ```
 
-Run:
+No runtime Python dependencies — the tool uses only the standard
+library. Full install instructions (including Python setup per OS)
+are in [INSTALL.md](INSTALL.md).
+
+Verify the install:
 
 ```bash
+network-ping-pro --version
+```
+
+Without installing, run it from the repository directory:
+
+```bash
+python -m network_ping_pro google.com
+# or
 python network_ping_pro.py google.com
 ```
 
-Linux/macOS:
+---
+
+## Quick examples
 
 ```bash
-python3 network_ping_pro.py google.com
+# Basic ICMP test (10 pings per target by default)
+network-ping-pro google.com github.com cloudflare.com
+
+# TCP connect test on port 443
+network-ping-pro -m TCP google.com:443 github.com:443
+
+# HTTP test (follows redirects, reports the most common status)
+network-ping-pro -m HTTP https://example.com https://www.wikipedia.org
+
+# Targets from a file (one per line, '#' for comments)
+network-ping-pro -f targets.txt
+
+# More samples, longer timeout, export results
+network-ping-pro -c 20 -t 5 -o results.csv --json results.json google.com
+
+# Quiet mode: one line per target on stdout, logs on stderr
+network-ping-pro -q google.com
+
+# HTTP through a SOCKS5 proxy (HTTP method only)
+network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 https://example.com
 ```
 
-### New to Python?
-
-If you have never used Python before, or you get an error such as:
-
-```text
-Python was not found
-```
-
-read the complete installation guide:
-
-➡️ **[INSTALL.md](INSTALL.md)**
+All options are documented in [USAGE.md](USAGE.md).
 
 ---
 
-## ✦ Quick Examples
+## Output and exit codes
 
-### Basic ping
+By default the tool prints a results table, a latency chart and a
+summary. `-q` prints one line per target (`OK` / `FAIL`) and is meant
+for scripts. CSV (`-o`) and JSON (`--json`) exports carry the same
+results, including per-stage timings and the HTTP status distribution.
 
-```bash
-python network_ping_pro.py google.com
-```
-
-### Test multiple targets
-
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com
-```
-
-### TCP test
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-### HTTP test
-
-```bash
-python network_ping_pro.py -m HTTP https://google.com
-```
-
-### Targets from file
-
-```bash
-python network_ping_pro.py -f targets.txt
-```
-
-For more commands and examples:
-
-➡️ **[USAGE.md](USAGE.md)**
+| Exit code | Meaning |
+| --------- | ------- |
+| 0 | All targets tested successfully |
+| 1 | At least one target failed, or a CSV/JSON export failed |
+| 2 | Usage error (no targets, invalid proxy, unreadable targets file) |
+| 130 | Interrupted with Ctrl+C |
 
 ---
 
-## ✦ Project Structure
+## Proxy
+
+Proxy applies to the **HTTP method only** (ICMP cannot go through a
+proxy; TCP does not route through one).
+
+```bash
+network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 \
+    --proxy-user USER https://example.com
+```
+
+- The password is never printed in logs or terminal output; logs show
+  only `scheme://host:port`.
+- Prefer the environment variable over the flag — a password on the
+  command line is visible to other users via `ps` and shell history:
+
+```bash
+export NPP_PROXY_PASS='secret'
+network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 https://example.com
+```
+
+---
+
+## Project structure
 
 ```text
 Network-Ping-Pro/
-├── network_ping_pro.py
+├── network_ping_pro/          # the package
+│   ├── __init__.py            # public API re-exports
+│   ├── __main__.py            # `python -m network_ping_pro`
+│   ├── cli.py                 # argument parsing, main()
+│   ├── color.py               # terminal colours
+│   ├── dns.py                 # DNS resolver with timeout
+│   ├── engine.py              # ICMP / TCP / HTTP measurement
+│   ├── models.py              # PingResult, StageStats
+│   ├── render.py              # table, chart, summary output
+│   ├── runner.py              # concurrency, ranking, CSV/JSON export
+│   ├── stats.py               # percentiles, jitter, Score
+│   ├── targets.py             # target parsing and validation
+│   └── version.py             # single source of truth for the version
+├── network_ping_pro.py        # thin shim: `python network_ping_pro.py ...`
+├── test_network_ping_pro.py   # unit + integration tests
+├── test_package.py            # package layout and entry-point tests
+├── pyproject.toml             # install metadata, `network-ping-pro` script
+├── targets.example.txt        # example targets file
 ├── README.md
 ├── INSTALL.md
 ├── USAGE.md
-├── LICENSE
-├── requirements.txt
-├── .gitignore
-├── targets.example.txt
+├── CHANGELOG.md
+└── LICENSE
+```
+
+Run the tests:
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
 ```
 
 ---
 
-## ✦ Documentation
+## فارسی | Persian
 
-| Document                 | Description                     |
-| ------------------------ | ------------------------------- |
-| [README.md](README.md)   | Project overview                |
-| [INSTALL.md](INSTALL.md) | Complete installation guide     |
-| [USAGE.md](USAGE.md)     | Commands, options, and examples |
-| [LICENSE](LICENSE)       | MIT License                     |
+**Network Ping Pro** ابزار خط فرمان برای تست شبکه با Python است؛
+روی کامپیوتر خودت اجرا می‌شود و به سرویس مانیتورینگ خارجی نیاز ندارد.
+
+```bash
+pip install .
+network-ping-pro google.com
+```
+
+سه روش تست دارد: **ICMP** (پینگ معمولی)، **TCP** (اتصال به پورت،
+مثل ۴۴۳) و **HTTP** (با curl، با دنبال‌کردن ریدایرکت). برای هر مقصد
+میانگین/حداقل/حداکثر latency، جیتر، P95/P99، درصد Packet Loss و یک
+Score صفر تا صد گزارش می‌شود. Score یک معیار سفارشی برای مقایسه
+نتیجه‌ها داخل همین ابزار است، نه یک بنچمارک استاندارد. خروجی CSV و
+JSON، حالت quiet برای اسکریپت، و پروکسی برای HTTP هم پشتیبانی می‌شود.
+راهنمای کامل نصب در [INSTALL.md](INSTALL.md) و راهنمای استفاده در
+[USAGE.md](USAGE.md) است.
 
 ---
 
-# فارسی | Persian
+## License
 
-## ✦ Network Ping Pro چیست؟
-
-**Network Ping Pro** یک ابزار خط فرمان برای بررسی وضعیت شبکه و اندازه‌گیری latency است که با Python نوشته شده است.
-
-برنامه مستقیماً روی کامپیوتر شما اجرا می‌شود و برای تست‌های اصلی به یک سرویس مانیتورینگ خارجی نیاز ندارد.
-
-با این ابزار می‌توانید موارد زیر را بررسی کنید:
-
-* اتصال شبکه
-* سرعت پاسخ شبکه
-* Packet Loss
-* پایداری اتصال
-* اتصال TCP
-* پاسخ HTTP/HTTPS
-* Latency سرویس‌ها
-* حداقل و حداکثر latency
-* Average latency
-* Jitter
-* P95
-* P99
-* وضعیت چند مقصد به‌صورت هم‌زمان
+This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 ---
 
-## ✦ روش‌های تست
-
-### ICMP
-
-برای تست معمول ping:
-
-```bash
-python network_ping_pro.py google.com
-```
-
-### TCP
-
-برای بررسی اتصال به یک پورت:
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-### HTTP
-
-برای بررسی زمان پاسخ HTTP:
-
-```bash
-python network_ping_pro.py -m HTTP https://google.com
-```
-
----
-
-## ✦ نصب سریع
-
-ابتدا پروژه را دریافت کنید:
-
-```bash
-git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
-cd Network-Ping-Pro
-```
-
-سپس:
-
-```bash
-python network_ping_pro.py google.com
-```
-
-اگر Python را نصب نکرده‌اید یا با خطای `Python was not found` مواجه شدید، راهنمای کامل نصب را ببینید:
-
-➡️ **[راهنمای نصب](INSTALL.md)**
-
----
-
-## ✦ مثال‌های سریع
-
-تست یک مقصد:
-
-```bash
-python network_ping_pro.py google.com
-```
-
-تست چند مقصد:
-
-```bash
-python network_ping_pro.py google.com github.com cloudflare.com
-```
-
-تست TCP:
-
-```bash
-python network_ping_pro.py -m TCP google.com:443
-```
-
-تست HTTP:
-
-```bash
-python network_ping_pro.py -m HTTP https://google.com
-```
-
-خواندن مقصدها از فایل:
-
-```bash
-python network_ping_pro.py -f targets.txt
-```
-
-برای مشاهده تمام قابلیت‌ها و مثال‌ها:
-
-➡️ **[USAGE.md](USAGE.md)**
-
----
-
-## ✦ فلسفه پروژه
-
-هدف Network Ping Pro این است که یک ابزار نسبتاً ساده، سریع و کاربردی برای بررسی شبکه باشد؛ بدون اینکه کاربر مجبور باشد یک سیستم مانیتورینگ پیچیده راه‌اندازی کند.
-
----
-
-## ✦ License
-
-This project is licensed under the **MIT License**.
-
----
-
-## ✦ Me
+## Me
 
 [![Telegram](https://img.shields.io/badge/Telegram-erffan__hub-blue?style=for-the-badge\&logo=telegram)](https://t.me/erffan_hub)
 [![Twitter](https://img.shields.io/badge/Twitter-@Erffanhub__00-000000?style=for-the-badge\&logo=x\&logoColor=white)](https://x.com/Erffanhub_00)

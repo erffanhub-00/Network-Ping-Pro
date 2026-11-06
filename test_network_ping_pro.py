@@ -327,6 +327,7 @@ class TestGetGrade:
 # ============================================================
 
 class TestDNSResolver:
+    @pytest.mark.network
     def test_localhost(self):
         ip, family, elapsed, error = DNSResolver.resolve('localhost', timeout=2)
         assert error is None
@@ -335,6 +336,7 @@ class TestDNSResolver:
         assert elapsed is not None
         assert elapsed >= 0
 
+    @pytest.mark.network
     def test_nonexistent_host(self):
         ip, family, elapsed, error = DNSResolver.resolve(
             'this-host-should-not-exist-12345.invalid', timeout=2
@@ -342,6 +344,7 @@ class TestDNSResolver:
         assert ip is None
         assert error is not None
 
+    @pytest.mark.network
     def test_ip_literal(self):
         ip, family, elapsed, error = DNSResolver.resolve('127.0.0.1', timeout=2)
         assert error is None
@@ -874,6 +877,10 @@ class TestPingTcpMocked:
                 assert r.test_success is False
                 assert r.status == 'Refused'
                 assert r.times == []
+                # A refused port has no samples, so it gets the same
+                # grade _finalize() assigns to any sample-less result.
+                assert r.grade == 'Failed'
+                assert r.score == 0.0
 
     def test_dns_failure(self, stop_event):
         with patch.object(DNSResolver, 'resolve',
@@ -970,6 +977,7 @@ class TestMain:
 # ============================================================
 
 class TestEndToEndLocal:
+    @pytest.mark.network
     def test_icmp_localhost(self, stop_event):
         r = PingEngine.ping_icmp('127.0.0.1', 2, 2, stop_event)
         if not r.test_success:

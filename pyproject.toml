@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "network-ping-pro"
-version = "1.0.0"
+version = "1.1.0"
 description = "Network diagnostic tool (CLI): ICMP, TCP and HTTP latency, jitter and packet loss."
 authors = [{name = "Erffan"}]
 license = {text = "MIT"}
@@ -12,7 +12,10 @@ readme = "README.md"
 requires-python = ">=3.9"
 
 [project.scripts]
-network-ping-pro = "network_ping_pro:main"
+network-ping-pro = "network_ping_pro.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
 
 [tool.setuptools]
-py-modules = ["network_ping_pro"]
+packages = ["network_ping_pro"]
