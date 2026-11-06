@@ -75,10 +75,15 @@ class TestColor:
         assert Color.RED == '\033[91m'
 
     def test_disable(self):
-        saved = Color.GREEN
-        Color.disable()
-        assert Color.GREEN == ''
-        Color.GREEN = saved
+        # disable() clears every color globally, so save and restore all.
+        saved = {a: getattr(Color, a) for a in dir(Color)
+                 if a.isupper() and isinstance(getattr(Color, a), str)}
+        try:
+            Color.disable()
+            assert Color.GREEN == ''
+        finally:
+            for attr, value in saved.items():
+                setattr(Color, attr, value)
 
 
 # ============================================================
@@ -226,10 +231,10 @@ class TestCalculateScore:
         r.jitter = 1.0
         r.p95 = 8.0
         score = StatisticsEngine.calculate_score(r)
-        assert score >= 90.0
+        assert score == 100.0
 
     def test_high_latency_low_score(self):
-        # Score is a weighted sum: latency only contributes 35%.
+        # Score is a weighted sum: latency only contributes 40%.
         # With loss=0 and jitter=1, the score stays moderate even at high latency.
         r = PingResult(target='x', method='ICMP')
         r.test_success = True
@@ -241,7 +246,7 @@ class TestCalculateScore:
         assert score < 70.0
 
     def test_full_loss_low_score(self):
-        # Loss contributes 30%. A perfect latency + jitter still leaves
+        # Loss contributes 35%. A perfect latency + jitter still leaves
         # the score below ~70 even with 100% loss.
         r = PingResult(target='x', method='ICMP')
         r.test_success = True
@@ -517,6 +522,17 @@ class TestTargetParser:
         p = TargetParser.parse_target('GOOGLE.COM')
         assert p['host'] == 'google.com'
 
+    @pytest.mark.parametrize("value", [
+        '-n',           # would be parsed as a ping option
+        '--help',       # would be parsed as a ping option
+        'google.com:0',
+        'google.com:65536',
+        '[:::]',        # invalid IPv6
+        '[gggg::1]',    # invalid IPv6
+    ])
+    def test_rejects_invalid_target(self, value):
+        assert TargetParser.parse_target(value) is None
+
 
 class TestTargetParserSites:
     def test_empty(self):
@@ -549,6 +565,11 @@ class TestTargetParserSites:
     def test_invalid_skipped(self):
         result = TargetParser.parse_sites('google.com,,,github.com')
         assert len(result) == 2
+
+    def test_invalid_reported_not_silent(self):
+        result = TargetParser.parse_sites('google.com,-n,github.com')
+        assert len(result) == 2
+        assert TargetParser.last_skipped == ['-n']
 
 
 # ============================================================
@@ -951,10 +972,11 @@ class TestMain:
 class TestEndToEndLocal:
     def test_icmp_localhost(self, stop_event):
         r = PingEngine.ping_icmp('127.0.0.1', 2, 2, stop_event)
-        if r.test_success:
-            assert r.times
-            assert r.avg is not None
-            assert r.score is not None
+        if not r.test_success:
+            pytest.skip('ping to localhost failed in this environment')
+        assert r.times
+        assert r.avg is not None
+        assert r.score is not None
 
     def test_parser_full_flow(self):
         targets = TargetParser.parse_sites('example.com,example.org,example.net')
@@ -1023,6 +1045,7 @@ class TestPingAllConcurrency:
         parser = build_parser()
         args = parser.parse_args(['-c', '1', '-w', '3', 'a.com', 'b.com', 'c.com'])
         args = clamp_args(args)
+        args.targets = '\n'.join(args.targets)
         runner = PingRunner(args)
 
         def fake_ping(target, method, count, timeout, stop_event):
@@ -1043,3 +1066,200 @@ class TestPingAllConcurrency:
 
         assert len(results) == 3
         assert all(r.test_success for r in results)
+
+# ============================================================
+# 26. Regression: ICMP summary lines must not count as replies
+# ============================================================
+
+class TestIcmpSummaryNotCounted:
+    LINUX_OUTPUT = (
+        "PING example.com (1.2.3.4) 56(84) bytes of data.\n"
+        "64 bytes from 1.2.3.4: icmp_seq=1 ttl=56 time=10.1 ms\n"
+        "64 bytes from 1.2.3.4: icmp_seq=2 ttl=56 time=12.2 ms\n"
+        "64 bytes from 1.2.3.4: icmp_seq=3 ttl=56 time=11.3 ms\n"
+        "64 bytes from 1.2.3.4: icmp_seq=4 ttl=56 time=13.4 ms\n"
+        "\n"
+        "--- example.com ping statistics ---\n"
+        "4 packets transmitted, 4 received, 0% packet loss, time 3004ms\n"
+        "rtt min/avg/max/mdev = 10.100/12.000/13.400/1.234 ms\n"
+    )
+
+    def _run(self, output, count, stop_event):
+        with patch.object(DNSResolver, 'resolve',
+                          return_value=('1.2.3.4', 'IPv4', 1.0, None)):
+            with patch('subprocess.Popen') as mock_popen:
+                proc = MagicMock()
+                proc.poll.return_value = 0
+                proc.communicate.return_value = (output, '')
+                mock_popen.return_value = proc
+                return PingEngine.ping_icmp('example.com', count, 1, stop_event)
+
+    def test_summary_numbers_not_counted(self, stop_event):
+        r = self._run(self.LINUX_OUTPUT, 4, stop_event)
+        assert r.test_success is True
+        assert r.times == [10.1, 12.2, 11.3, 13.4]
+        assert r.successes == 4
+        assert r.packet_loss == 0.0
+
+    def test_times_capped_at_count(self, stop_event):
+        r = self._run(self.LINUX_OUTPUT, 2, stop_event)
+        assert len(r.times) == 2
+        assert r.successes == 2
+
+
+# ============================================================
+# 27. HTTP: mixed statuses, redirects, curl errors
+# ============================================================
+
+class TestPingHttpMixed:
+    def _fake_curl(self, codes, mock_popen):
+        procs = []
+        for code in codes:
+            proc = MagicMock()
+            proc.poll.return_value = 0
+            proc.returncode = 0
+            proc.communicate.return_value = (f"0.120|{code}|0.010|0.050", '')
+            procs.append(proc)
+        mock_popen.side_effect = procs
+
+    def _run_http(self, codes, count, stop_event, mock_popen):
+        with patch.object(DNSResolver, 'resolve',
+                          return_value=('1.2.3.4', 'IPv4', 1.0, None)):
+            with patch('subprocess.run'):
+                self._fake_curl(codes, mock_popen)
+                return PingEngine.ping_http(
+                    {'host': 'example.com', 'scheme': 'https',
+                     'port': None, 'path': '/', 'query': ''},
+                    count, 1, stop_event
+                )
+
+    def test_mixed_statuses_report_mode_not_max(self, stop_event):
+        with patch('subprocess.Popen') as mock_popen:
+            r = self._run_http([200, 200, 200, 500], 4, stop_event, mock_popen)
+        assert r.test_success is True
+        assert r.http_status == 200
+        assert r.http_status_distribution == {200: 3, 500: 1}
+        assert r.status.startswith('Mixed')
+
+    def test_all_same_status_ok(self, stop_event):
+        with patch('subprocess.Popen') as mock_popen:
+            r = self._run_http([200, 200], 2, stop_event, mock_popen)
+        assert r.http_status == 200
+        assert r.status == 'OK'
+
+    def test_curl_follows_redirects(self, stop_event):
+        with patch('subprocess.Popen') as mock_popen:
+            self._run_http([200], 1, stop_event, mock_popen)
+        cmd = mock_popen.call_args[0][0]
+        assert '-L' in cmd
+
+    def test_curl_error_kept(self, stop_event):
+        with patch.object(DNSResolver, 'resolve',
+                          return_value=('1.2.3.4', 'IPv4', 1.0, None)):
+            with patch('subprocess.run'):
+                with patch('subprocess.Popen') as mock_popen:
+                    proc = MagicMock()
+                    proc.poll.return_value = 0
+                    proc.returncode = 6
+                    proc.communicate.return_value = (
+                        '', 'curl: (6) Could not resolve host: example.com\n')
+                    mock_popen.return_value = proc
+                    r = PingEngine.ping_http(
+                        {'host': 'example.com', 'scheme': 'https',
+                         'port': None, 'path': '/', 'query': ''},
+                        1, 1, stop_event
+                    )
+        assert r.test_success is False
+        assert 'Could not resolve host' in (r.error or '')
+
+
+# ============================================================
+# 28. Proxy password must never appear in logs
+# ============================================================
+
+class TestProxyPasswordNotLogged:
+    def test_display_url_masks_credentials(self):
+        PingEngine.set_proxy('socks5://user:s3cret@127.0.0.1:10808')
+        try:
+            display = PingEngine.proxy_display_url()
+            assert display == 'socks5://127.0.0.1:10808'
+            assert 's3cret' not in display
+            assert 'user' not in display
+        finally:
+            PingEngine.clear_proxy()
+
+    def test_display_url_no_proxy(self):
+        PingEngine.clear_proxy()
+        assert PingEngine.proxy_display_url() is None
+
+    def test_runner_log_masks_password(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args([
+            '-m', 'HTTP', '--proxy', 'socks5://user:s3cret@127.0.0.1:10808',
+            'example.com',
+        ])
+        args = clamp_args(args)
+        args.targets = '\n'.join(args.targets)
+        runner = PingRunner(args)
+
+        def fake_ping(target, method, count, timeout, stop_event):
+            r = PingResult(target=target['host'], method=method)
+            r.test_success = True
+            r.reachable = True
+            r.times = [10.0]
+            r.attempts = 1
+            r.successes = 1
+            r.status = 'OK'
+            PingEngine._finalize(r)
+            return r
+
+        with patch.object(PingEngine, 'ping_host', side_effect=fake_ping):
+            rc = runner.run()
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert 's3cret' not in captured.out
+        assert 's3cret' not in captured.err
+        assert 'socks5://127.0.0.1:10808' in captured.out
+
+
+# ============================================================
+# 29. clamp_args warns; export failure is not silent
+# ============================================================
+
+class TestClampWarns:
+    def test_count_clamp_warns(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(['-c', '999', 'google.com'])
+        clamp_args(args)
+        assert args.count == 200
+        captured = capsys.readouterr()
+        assert 'count clamped 999 -> 200' in captured.err
+
+    def test_no_warning_inside_limits(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(['-c', '10', 'google.com'])
+        clamp_args(args)
+        assert capsys.readouterr().err == ''
+
+
+class TestExportFailure:
+    def _runner(self):
+        parser = build_parser()
+        args = parser.parse_args(['google.com'])
+        return PingRunner(clamp_args(args))
+
+    def test_csv_export_failure_returns_false(self, tmp_path):
+        runner = self._runner()
+        assert runner._export_csv(str(tmp_path / 'no-such-dir' / 'out.csv')) is False
+
+    def test_json_export_failure_returns_false(self, tmp_path):
+        runner = self._runner()
+        assert runner._export_json(str(tmp_path / 'no-such-dir' / 'out.json')) is False
+
+    def test_csv_export_success_returns_true(self, tmp_path):
+        runner = self._runner()
+        assert runner._export_csv(str(tmp_path / 'out.csv')) is True
+
+    def test_json_export_success_returns_true(self, tmp_path):
+        runner = self._runner()
+        assert runner._export_json(str(tmp_path / 'out.json')) is True

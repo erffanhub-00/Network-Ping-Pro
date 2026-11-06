@@ -112,15 +112,15 @@ You can still use ICMP and TCP testing without curl.
 If Git is installed:
 
 ```cmd
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 ```
 
 ### Option B — ZIP
 
 Open:
 
-https://github.com/erffanhub-00/network-ping-pro
+https://github.com/erffanhub-00/Network-Ping-Pro
 
 Select:
 
@@ -135,7 +135,7 @@ Then open Command Prompt in the extracted folder.
 Example:
 
 ```cmd
-cd /d "D:\tools\network-ping-pro"
+cd /d "D:\tools\Network-Ping-Pro"
 ```
 
 ---
@@ -174,8 +174,8 @@ sudo pacman -S python curl git
 Clone the project:
 
 ```bash
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 ```
 
 Run:
@@ -205,8 +205,8 @@ brew install python
 Clone the project:
 
 ```bash
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 ```
 
 Run:
@@ -224,15 +224,15 @@ There are two common ways.
 ## Git
 
 ```bash
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 ```
 
 ## ZIP
 
 Download:
 
-https://github.com/erffanhub-00/network-ping-pro
+https://github.com/erffanhub-00/Network-Ping-Pro
 
 Then:
 
@@ -408,16 +408,16 @@ Network Ping Pro requires Python 3.9+.
 ## Windows
 
 ```cmd
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 python network_ping_pro.py google.com
 ```
 
 ## Linux / macOS
 
 ```bash
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 python3 network_ping_pro.py google.com
 ```
 
@@ -439,7 +439,7 @@ python network_ping_pro.py --help
 
 If the program does not work, open an issue:
 
-https://github.com/erffanhub-00/network-ping-pro/issues
+https://github.com/erffanhub-00/Network-Ping-Pro/issues
 
 Include:
 

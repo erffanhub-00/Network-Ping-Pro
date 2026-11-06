@@ -276,7 +276,7 @@ class StatisticsEngine:
             elif 500 <= r.http_status < 600:
                 app_penalty = 0.40
 
-        final = (latency * 0.35 + loss * 0.30 + jitter * 0.25) * p95_penalty * app_penalty
+        final = (latency * 0.40 + loss * 0.35 + jitter * 0.25) * p95_penalty * app_penalty
         return round(max(0.0, min(100.0, final)), 1)
 
     @staticmethod
@@ -304,6 +304,9 @@ class DNSResolver:
     Note: socket.getaddrinfo() cannot be interrupted mid-call. This
     function uses a daemon thread and joins with a timeout, so from the
     caller's perspective the resolution "gives up" after `timeout` seconds.
+    The thread itself may keep running until getaddrinfo returns; it only
+    writes its result once, under a lock, so a late write cannot race
+    with the caller's read.
     """
 
     @staticmethod
@@ -314,32 +317,36 @@ class DNSResolver:
         family is 'IPv4' or 'IPv6'.
         """
         result: Dict[str, Any] = {'ip': None, 'family': None, 'elapsed': None, 'error': None}
+        lock = threading.Lock()
 
         def worker():
+            local: Dict[str, Any] = {'ip': None, 'family': None, 'elapsed': None, 'error': None}
             try:
                 start = time.perf_counter()
                 infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
                 elapsed = (time.perf_counter() - start) * 1000
-                result['elapsed'] = round(elapsed, 1)
+                local['elapsed'] = round(elapsed, 1)
 
                 if not infos:
-                    result['error'] = 'No addresses'
-                    return
+                    local['error'] = 'No addresses'
+                else:
+                    chosen = None
+                    for info in infos:
+                        if info[0] == socket.AF_INET:
+                            chosen = info
+                            break
+                    if chosen is None:
+                        chosen = infos[0]
 
-                chosen = None
-                for info in infos:
-                    if info[0] == socket.AF_INET:
-                        chosen = info
-                        break
-                if chosen is None:
-                    chosen = infos[0]
-
-                result['ip'] = chosen[4][0]
-                result['family'] = 'IPv4' if chosen[0] == socket.AF_INET else 'IPv6'
+                    local['ip'] = chosen[4][0]
+                    local['family'] = 'IPv4' if chosen[0] == socket.AF_INET else 'IPv6'
             except socket.gaierror as e:
-                result['error'] = str(e)
+                local['error'] = str(e)
             except Exception as e:
-                result['error'] = str(e)
+                local['error'] = str(e)
+            finally:
+                with lock:
+                    result.update(local)
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
@@ -408,6 +415,20 @@ class PingEngine:
         return f"{scheme}://{auth}{host_part}:{port}"
 
     @staticmethod
+    def proxy_display_url() -> Optional[str]:
+        """Proxy URL without credentials, safe for logs."""
+        if not PingEngine.PROXY_URL:
+            return None
+        parsed = urlparse(PingEngine.PROXY_URL)
+        if not parsed.scheme or not parsed.hostname:
+            return 'proxy (unparsable URL)'
+        host = parsed.hostname
+        if ':' in host and not host.startswith('['):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ''
+        return f"{parsed.scheme}://{host}{port}"
+
+    @staticmethod
     def _finalize(r: PingResult):
         """Compute stats, score, grade, and set default status."""
         if not r.times:
@@ -468,12 +489,12 @@ class PingEngine:
         system = platform.system().lower()
         if system == 'windows':
             w_ms = max(1, int(round(timeout * 1000)))
-            cmd = ['ping', '-n', str(count), '-w', str(w_ms), host]
+            cmd = ['ping', '-n', str(count), '-w', str(w_ms), '--', host]
         elif system == 'darwin':
             w_ms = max(1, int(round(timeout * 1000)))
-            cmd = ['ping', '-c', str(count), '-W', str(w_ms), host]
+            cmd = ['ping', '-c', str(count), '-W', str(w_ms), '--', host]
         else:
-            cmd = ['ping', '-c', str(count), '-W', f'{timeout:.2f}', host]
+            cmd = ['ping', '-c', str(count), '-W', f'{timeout:.2f}', '--', host]
 
         process = None
         try:
@@ -502,20 +523,19 @@ class PingEngine:
             stdout, stderr = process.communicate()
             output = stdout + stderr
 
+            # Only reply lines (time=..ms) count as replies. The summary
+            # line (rtt min/avg/max/mdev = ...) must not be counted:
+            # its numbers are statistics, not individual pings.
             times: List[float] = []
-            for pattern in (
-                r'time[=<]\s*(\d+(?:[.,]\d+)?)\s*ms',
-                r'(\d+(?:[.,]\d+)?)\s*ms',
-            ):
-                for m in re.findall(pattern, output, re.IGNORECASE):
-                    try:
-                        v = float(m.replace(',', '.'))
-                        if 0 <= v <= 10000:
-                            times.append(v)
-                    except ValueError:
-                        continue
-                if times:
-                    break
+            for m in re.findall(r'time[=<]\s*(\d+(?:[.,]\d+)?)\s*ms',
+                                output, re.IGNORECASE):
+                try:
+                    v = float(m.replace(',', '.'))
+                    if 0 <= v <= 10000:
+                        times.append(v)
+                except ValueError:
+                    continue
+            times = times[:count]
 
             if not times:
                 lower = output.lower()
@@ -692,6 +712,7 @@ class PingEngine:
         connect_samples: List[float] = []
         ttfb_samples: List[float] = []
         status_codes: List[int] = []
+        last_curl_error: Optional[str] = None
 
         proxy_url = PingEngine._build_proxy_url()
         timeout_str = f'{timeout:.2f}'
@@ -703,7 +724,7 @@ class PingEngine:
                 return r
 
             cmd = [
-                'curl', '-s', '-o', PingEngine.NULL_DEVICE,
+                'curl', '-s', '-L', '-o', PingEngine.NULL_DEVICE,
                 '-w', curl_fmt,
                 '--connect-timeout', timeout_str,
                 '--max-time', timeout_str,
@@ -735,6 +756,8 @@ class PingEngine:
                 stdout, stderr = process.communicate()
 
                 if process.returncode != 0:
+                    if stderr.strip():
+                        last_curl_error = stderr.strip().splitlines()[-1][:100]
                     continue
 
                 if not stdout:
@@ -778,6 +801,8 @@ class PingEngine:
 
         if not total_samples:
             r.error = 'No HTTP response'
+            if last_curl_error:
+                r.error += f' ({last_curl_error})'
             r.status = 'Failed'
             return r
 
@@ -794,10 +819,9 @@ class PingEngine:
             r.http_status_distribution = dict(dist)
 
             unique = list(dist.keys())
-            if len(unique) == 1:
-                r.http_status = unique[0]
-            else:
-                r.http_status = max(unique)
+            # Representative status is the most common code, not the max:
+            # a mix of 200 and 500 must not be reported as just 500.
+            r.http_status = dist.most_common(1)[0][0]
 
             r.http_status_text = {
                 200: 'OK', 201: 'Created', 204: 'No Content',
@@ -811,15 +835,19 @@ class PingEngine:
 
             r.application_ok = 200 <= r.http_status < 400
 
-            if r.application_ok and len(unique) == 1:
-                r.status = 'OK'
-            elif r.application_ok:
+            if len(unique) == 1:
+                if r.application_ok:
+                    r.status = 'OK'
+                else:
+                    txt = r.http_status_text or ''
+                    r.status = f'HTTP {r.http_status} {txt}'.strip()
+            elif all(200 <= c < 400 for c in unique):
                 r.status = 'Mixed 2xx/3xx'
-            elif 400 <= r.http_status < 600:
-                txt = r.http_status_text or ''
-                r.status = f'HTTP {r.http_status} {txt}'.strip()
             else:
-                r.status = f'HTTP {r.http_status}'
+                parts = ', '.join(
+                    f"{c}x{n}" for c, n in sorted(dist.items())
+                )
+                r.status = f'Mixed: {parts}'
         else:
             r.status = 'OK'
 
@@ -835,6 +863,12 @@ class PingEngine:
         host = target['host']
         if stop_event.is_set():
             return PingResult(target=host, method=method, status='Cancelled')
+
+        # A host starting with '-' must never reach a subprocess as an
+        # option (option injection via a targets file).
+        if not host or host.startswith('-'):
+            return PingResult(target=host, method=method,
+                              status='Error', error='Invalid host')
 
         if method == 'ICMP':
             return PingEngine.ping_icmp(host, count, timeout, stop_event)
@@ -855,6 +889,17 @@ class PingEngine:
 # ============================================================
 
 class TargetParser:
+    # Targets dropped by the last parse_sites() call (invalid input).
+    last_skipped: List[str] = []
+
+    @staticmethod
+    def _valid_host(host: str) -> bool:
+        """Reject option-like hosts and invalid characters."""
+        if not host or host.startswith('-') or host.startswith('.'):
+            return False
+        if any(c.isspace() or ord(c) < 32 for c in host):
+            return False
+        return re.fullmatch(r'[A-Za-z0-9._:-]+', host) is not None
 
     @staticmethod
     def parse_target(value: str) -> Optional[Dict[str, Any]]:
@@ -865,20 +910,29 @@ class TargetParser:
 
             if value.startswith('['):
                 m = re.match(r'\[([0-9a-fA-F:]+)\](?::(\d+))?$', value)
-                if m:
-                    return {
-                        'host': m.group(1),
-                        'port': int(m.group(2)) if m.group(2) else None,
-                        'scheme': None,
-                        'path': '/',
-                        'query': '',
-                        'raw': value,
-                    }
-                return None
+                if not m:
+                    return None
+                try:
+                    socket.inet_pton(socket.AF_INET6, m.group(1))
+                except OSError:
+                    return None
+                port = int(m.group(2)) if m.group(2) else None
+                if port is not None and not 1 <= port <= 65535:
+                    return None
+                return {
+                    'host': m.group(1),
+                    'port': port,
+                    'scheme': None,
+                    'path': '/',
+                    'query': '',
+                    'raw': value,
+                }
 
             parsed = urlparse(value if '://' in value else '//' + value)
             host = parsed.hostname
-            if not host:
+            if not host or not TargetParser._valid_host(host):
+                return None
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
                 return None
 
             return {
@@ -896,9 +950,12 @@ class TargetParser:
     def parse_sites(text: str) -> List[Dict[str, Any]]:
         seen = set()
         out: List[Dict[str, Any]] = []
+        skipped: List[str] = []
         for chunk in text.replace('،', ',').replace('\n', ',').split(','):
             parsed = TargetParser.parse_target(chunk)
             if not parsed:
+                if chunk.strip():
+                    skipped.append(chunk.strip())
                 continue
             key = (
                 parsed['scheme'],
@@ -911,6 +968,7 @@ class TargetParser:
                 continue
             seen.add(key)
             out.append(parsed)
+        TargetParser.last_skipped = skipped
         return out
 
 
@@ -1211,7 +1269,9 @@ class PingRunner:
 
     def _log(self, msg: str, color: str = Color.RESET):
         ts = datetime.now().strftime('%H:%M:%S')
-        print(f"{Color.GRAY}[{ts}]{Color.RESET} {color}{msg}{Color.RESET}")
+        # In quiet mode stdout is machine-readable output; logs go to stderr.
+        stream = sys.stderr if getattr(self.args, 'quiet', False) else sys.stdout
+        print(f"{Color.GRAY}[{ts}]{Color.RESET} {color}{msg}{Color.RESET}", file=stream)
 
     def run(self) -> int:
         started = time.time()
@@ -1219,6 +1279,9 @@ class PingRunner:
         if not targets:
             self._log("No valid targets found.", Color.RED)
             return 2
+
+        for bad in TargetParser.last_skipped:
+            self._log(f"Skipped invalid target: {bad}", Color.YELLOW)
 
         if self.args.proxy:
             try:
@@ -1229,8 +1292,10 @@ class PingRunner:
                     raise ValueError("host or port missing")
                 PingEngine.set_proxy(self.args.proxy,
                                      self.args.proxy_user, self.args.proxy_pass)
-                self._log(f"Proxy enabled (HTTP method only): {self.args.proxy}",
-                          Color.CYAN)
+                # Log the proxy without credentials: a password in the
+                # URL must never end up in the terminal or a log file.
+                self._log(f"Proxy enabled (HTTP method only): "
+                          f"{PingEngine.proxy_display_url()}", Color.CYAN)
             except Exception as e:
                 self._log(f"Invalid proxy: {e}", Color.RED)
                 return 2
@@ -1269,10 +1334,14 @@ class PingRunner:
                 else:
                     print(f"FAIL  {r.target:<40} {r.status}  {r.error or ''}")
 
+        export_ok = True
         if self.args.output_csv:
-            self._export_csv(self.args.output_csv)
+            export_ok = self._export_csv(self.args.output_csv) and export_ok
         if self.args.output_json:
-            self._export_json(self.args.output_json)
+            export_ok = self._export_json(self.args.output_json) and export_ok
+
+        if not export_ok:
+            return 1
 
         def is_real_success(r):
             return r.test_success and bool(r.times)
@@ -1338,7 +1407,7 @@ class PingRunner:
         failed.sort(key=lambda x: (not x.reachable, x.target))
         return successful + failed
 
-    def _export_csv(self, path: str):
+    def _export_csv(self, path: str) -> bool:
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 w = csv.writer(f)
@@ -1380,10 +1449,12 @@ class PingRunner:
                         dist_str,
                     ])
             self._log(f"CSV → {path}", Color.GREEN)
+            return True
         except Exception as e:
             self._log(f"CSV export failed: {e}", Color.RED)
+            return False
 
-    def _export_json(self, path: str):
+    def _export_json(self, path: str) -> bool:
         try:
             data = {
                 'tool': 'Network Ping Pro',
@@ -1398,8 +1469,10 @@ class PingRunner:
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             self._log(f"JSON → {path}", Color.GREEN)
+            return True
         except Exception as e:
             self._log(f"JSON export failed: {e}", Color.RED)
+            return False
 
 
 # ============================================================
@@ -1464,7 +1537,10 @@ Notes:
                    help='Proxy URL (http/https/socks4/socks5). Applies to '
                         'HTTP method only. Example: socks5://127.0.0.1:10808')
     p.add_argument('--proxy-user', help='Proxy username')
-    p.add_argument('--proxy-pass', help='Proxy password')
+    p.add_argument('--proxy-pass',
+                   help='Proxy password. Prefer the NPP_PROXY_PASS '
+                        'environment variable: a password on the command '
+                        'line is visible to other users via ps and shell history.')
 
     p.add_argument('-o', '--output-csv', metavar='FILE',
                    help='Export results to CSV')
@@ -1484,9 +1560,14 @@ Notes:
 
 
 def clamp_args(args):
-    args.count = max(1, min(200, args.count))
-    args.timeout = max(1.0, min(30.0, args.timeout))
-    args.workers = max(1, min(50, args.workers))
+    for name, lo, hi in (('count', 1, 200), ('timeout', 1.0, 30.0),
+                         ('workers', 1, 50)):
+        value = getattr(args, name)
+        clamped = max(lo, min(hi, value))
+        if clamped != value:
+            print(f"Warning: {name} clamped {value} -> {clamped}",
+                  file=sys.stderr)
+        setattr(args, name, clamped)
     return args
 
 
@@ -1516,6 +1597,11 @@ def main(argv=None) -> int:
     if args.no_color:
         Color.disable()
 
+    # Proxy password from the environment, so it never has to appear
+    # on the command line (visible via ps / shell history).
+    if args.proxy_pass is None:
+        args.proxy_pass = os.environ.get('NPP_PROXY_PASS')
+
     all_targets = list(args.targets)
     if args.file:
         try:
@@ -1532,8 +1618,9 @@ def main(argv=None) -> int:
     args.targets = '\n'.join(all_targets)
     args = clamp_args(args)
 
-    Renderer.banner()
-    print()
+    if not args.quiet:
+        Renderer.banner()
+        print()
 
     try:
         runner = PingRunner(args)

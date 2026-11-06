@@ -398,17 +398,32 @@ to see the exact export arguments supported by your installed version.
 
 # 16. Proxy
 
-HTTP tests can support proxy configuration when proxy options are available.
-
-This can be useful when your network requires traffic to pass through a proxy server.
-
-Always check:
+Proxy applies to HTTP tests only (ICMP cannot use a proxy, and TCP
+does not route through one).
 
 ```bash
-python network_ping_pro.py --help
+python network_ping_pro.py -m HTTP --proxy socks5://127.0.0.1:10808 https://google.com
+python network_ping_pro.py -m HTTP --proxy http://127.0.0.1:8080 --proxy-user alice --proxy-pass secret https://example.com
 ```
 
-for the exact proxy arguments supported by your version.
+| Flag | Description |
+| ---- | ----------- |
+| `--proxy URL` | Proxy URL (`http` / `https` / `socks4` / `socks5`), e.g. `socks5://127.0.0.1:10808` |
+| `--proxy-user USER` | Proxy username |
+| `--proxy-pass PASS` | Proxy password |
+
+Do not put the password in the proxy URL (`socks5://user:pass@host:port`)
+and avoid `--proxy-pass` on shared machines: both are visible to other
+users via `ps` and in shell history. Prefer the `NPP_PROXY_PASS`
+environment variable instead:
+
+```bash
+export NPP_PROXY_PASS='secret'
+python network_ping_pro.py -m HTTP --proxy socks5://127.0.0.1:10808 --proxy-user alice https://example.com
+```
+
+The proxy is never printed with credentials: the log only shows
+`scheme://host:port`.
 
 ---
 

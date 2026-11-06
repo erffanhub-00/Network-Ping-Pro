@@ -2,7 +2,7 @@
 
 A lightweight and practical network diagnostic tool for testing **ICMP, TCP, and HTTP connectivity and latency** from your local machine.
 
-> 🌐 **Project:** [Network Ping Pro](https://github.com/erffanhub-00/network-ping-pro)
+> 🌐 **Project:** [Network Ping Pro](https://github.com/erffanhub-00/Network-Ping-Pro)
 > 📖 **Installation Guide:** [INSTALL.md](INSTALL.md)
 > 📚 **Usage Guide:** [USAGE.md](USAGE.md)
 
@@ -128,8 +128,8 @@ HTTP testing requires `curl`.
 Clone the repository:
 
 ```bash
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 ```
 
 Run:
@@ -199,7 +199,7 @@ For more commands and examples:
 ## ✦ Project Structure
 
 ```text
-network-ping-pro/
+Network-Ping-Pro/
 ├── network_ping_pro.py
 ├── README.md
 ├── INSTALL.md
@@ -208,17 +208,7 @@ network-ping-pro/
 ├── requirements.txt
 ├── .gitignore
 ├── targets.example.txt
-└── screenshots/
-    └── demo.png
 ```
-
----
-
-## 🚀 Demo
-
-Network Ping Pro running directly from the Windows Command Prompt:
-
-![Network Ping Pro Demo](screenshots/demo.gif)
 
 ---
 
@@ -292,8 +282,8 @@ python network_ping_pro.py -m HTTP https://google.com
 ابتدا پروژه را دریافت کنید:
 
 ```bash
-git clone https://github.com/erffanhub-00/network-ping-pro.git
-cd network-ping-pro
+git clone https://github.com/erffanhub-00/Network-Ping-Pro.git
+cd Network-Ping-Pro
 ```
 
 سپس:
