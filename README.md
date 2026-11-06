@@ -4,9 +4,13 @@ A command-line network diagnostic tool for testing **ICMP, TCP and HTTP
 connectivity and latency** from your own machine — no monitoring server,
 no account, no external service.
 
-> 📖 **Installation:** [INSTALL.md](INSTALL.md)
-> 📚 **Full usage reference:** [USAGE.md](USAGE.md)
-> 📝 **Changelog:** [CHANGELOG.md](CHANGELOG.md)
+[![CI](https://github.com/erffanhub-00/Network-Ping-Pro/actions/workflows/ci.yml/badge.svg)](https://github.com/erffanhub-00/Network-Ping-Pro/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](CHANGELOG.md)
+
+> **Installation:** [INSTALL.md](INSTALL.md)
+> **Full usage reference:** [USAGE.md](USAGE.md)
+> **Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
 ```bash
 network-ping-pro google.com github.com
@@ -16,7 +20,7 @@ network-ping-pro -m HTTP https://example.com
 
 ---
 
-## What it measures
+## Features
 
 For each target the tool reports:
 
@@ -106,7 +110,7 @@ python network_ping_pro.py google.com
 
 ---
 
-## Quick examples
+## Usage
 
 ```bash
 # Basic ICMP test (10 pings per target by default)
@@ -133,9 +137,7 @@ network-ping-pro -m HTTP --proxy socks5://127.0.0.1:10808 https://example.com
 
 All options are documented in [USAGE.md](USAGE.md).
 
----
-
-## Output and exit codes
+### Output and exit codes
 
 By default the tool prints a results table, a latency chart and a
 summary. `-q` prints one line per target (`OK` / `FAIL`) and is meant
@@ -149,9 +151,7 @@ results, including per-stage timings and the HTTP status distribution.
 | 2 | Usage error (no targets, invalid proxy, unreadable targets file) |
 | 130 | Interrupted with Ctrl+C |
 
----
-
-## Proxy
+### Proxy
 
 Proxy applies to the **HTTP method only** (ICMP cannot go through a
 proxy; TCP does not route through one).
@@ -202,12 +202,19 @@ Network-Ping-Pro/
 └── LICENSE
 ```
 
-Run the tests:
+---
+
+## Development
 
 ```bash
 pip install -e ".[dev]"
 python -m pytest -q
 ```
+
+Tests cover the Score and statistics, target parsing and validation,
+the ICMP/TCP/HTTP engines, proxy handling, CSV/JSON export and the
+package layout and entry points. Network-dependent tests are marked
+`network` and can be skipped with `python -m pytest -q -m "not network"`.
 
 ---
 
@@ -235,12 +242,3 @@ JSON، حالت quiet برای اسکریپت، و پروکسی برای HTTP ه
 ## License
 
 This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
-
----
-
-## Me
-
-[![Telegram](https://img.shields.io/badge/Telegram-erffan__hub-blue?style=for-the-badge\&logo=telegram)](https://t.me/erffan_hub)
-[![Twitter](https://img.shields.io/badge/Twitter-@Erffanhub__00-000000?style=for-the-badge\&logo=x\&logoColor=white)](https://x.com/Erffanhub_00)
-[![Gist](https://img.shields.io/badge/Gist-Profile-000000?style=for-the-badge\&logo=github)](https://gist.github.com/erffanhub-00)
-[![Github](https://img.shields.io/badge/Github-Profile-000000?style=for-the-badge\&logo=github)](https://github.com/erffanhub-00)
